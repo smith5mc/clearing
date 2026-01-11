@@ -6,7 +6,7 @@ The `ClearingHouse` smart contract implements a sophisticated settlement engine 
 
 ### 1. Deferred Asset Locking (Custody)
 The contract implements a **"Lock-on-Match"** mechanism to minimize capital inefficiency.
-- When a user submits a **Sell Order**, the asset remains in their wallet. They must only `approve` the contract.
+- When a user submits a **Sell Order** (via `submitMulticurrencySellOrder`), the asset remains in their wallet. They must only `approve` the contract.
 - **During Settlement**, if a matching Buy Order is found, the contract attempts to pull (lock) the asset immediately.
 - If the pull fails (e.g., approval revoked), the match fails and the order is skipped.
 - Once locked, the asset remains in the contract until either:
@@ -16,8 +16,8 @@ The contract implements a **"Lock-on-Match"** mechanism to minimize capital inef
 
 ### 2. Simple FIFO Matching & Multicurrency Support
 The contract uses a simplified matching engine, prioritizing order **submission time** rather than price optimization.
-- **Multicurrency**: Sellers can accept **multiple** payment tokens (e.g., "100 USDC or 200 DAI").
-- **Buyer Choice**: The Buyer chooses which payment token to use.
+- **Multicurrency**: Sellers can accept **multiple** payment tokens (e.g., "100 USDC or 200 DAI") using `submitMulticurrencySellOrder`.
+- **Buyer Choice**: The Buyer chooses which payment token to use via `submitBuyOrder`.
 - **Matching**: The engine checks if the Buyer's token is in the Seller's accepted list and if `Buy Price >= Sell Price` for that specific token.
 
 ### 3. Order Matching & Chains

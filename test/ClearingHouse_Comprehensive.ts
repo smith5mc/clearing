@@ -86,12 +86,11 @@ describe("ClearingHouse Comprehensive", function () {
           );
 
           console.log("  [Step 2] User 1 submits Buy Order using Token B (Price 200)");
-          await clearingHouse.connect(users[1]).submitOrder(
+          await clearingHouse.connect(users[1]).submitBuyOrder(
               bond.target,
               tokenId,
               paymentTokenB.target,
               priceB,
-              0, // Buy
               ethers.ZeroAddress
           );
 
@@ -137,12 +136,11 @@ describe("ClearingHouse Comprehensive", function () {
         );
 
         console.log("  [Step 2] User 2 submits Buy Order using Token A (Price 100)");
-        await clearingHouse.connect(users[2]).submitOrder(
+        await clearingHouse.connect(users[2]).submitBuyOrder(
             bond.target,
             tokenId,
             paymentToken.target,
             priceA,
-            0, // Buy
             ethers.ZeroAddress
         );
 
@@ -221,8 +219,23 @@ describe("ClearingHouse Comprehensive", function () {
                   const buyer = users[buyerIndex];
                   const price = ethers.parseUnits((10 + Math.floor(Math.random() * 100)).toString(), 18);
                   
-                  await clearingHouse.connect(initialOwner).submitOrder(assetContract.target, id, selectedPaymentToken.target, price, 1, ethers.ZeroAddress);
-                  await clearingHouse.connect(buyer).submitOrder(assetContract.target, id, selectedPaymentToken.target, price, 0, ethers.ZeroAddress);
+                  // Use submitMulticurrencySellOrder for Seller
+                  await clearingHouse.connect(initialOwner).submitMulticurrencySellOrder(
+                      assetContract.target,
+                      id,
+                      [selectedPaymentToken.target],
+                      [price],
+                      ethers.ZeroAddress
+                  );
+                  
+                  // Use submitBuyOrder for Buyer (changed from submitOrder)
+                  await clearingHouse.connect(buyer).submitBuyOrder(
+                      assetContract.target,
+                      id,
+                      selectedPaymentToken.target,
+                      price,
+                      ethers.ZeroAddress
+                  );
                   
                   batchOrders.push({ asset, seller: initialOwner, buyer, price, paymentToken: selectedPaymentToken });
                   allOrders.push({ asset, seller: initialOwner, buyer, price, paymentToken: selectedPaymentToken });
@@ -313,8 +326,23 @@ describe("ClearingHouse Comprehensive", function () {
         const price = ethers.parseUnits("100", 18);
         const tokenId = 0; // Bond 0 owned by User 0
 
-        await clearingHouse.connect(users[0]).submitOrder(bond.target, tokenId, paymentToken.target, price, 1, ethers.ZeroAddress);
-        await clearingHouse.connect(users[1]).submitOrder(bond.target, tokenId, paymentToken.target, price, 0, ethers.ZeroAddress);
+        // Use submitMulticurrencySellOrder for Seller
+        await clearingHouse.connect(users[0]).submitMulticurrencySellOrder(
+            bond.target,
+            tokenId,
+            [paymentToken.target],
+            [price],
+            ethers.ZeroAddress
+        );
+        
+        // Use submitBuyOrder for Buyer
+        await clearingHouse.connect(users[1]).submitBuyOrder(
+            bond.target,
+            tokenId,
+            paymentToken.target,
+            price,
+            ethers.ZeroAddress
+        );
 
         await increaseTime(301);
         await clearingHouse.performSettlement();

@@ -62,12 +62,11 @@ describe("ClearingHouse", function () {
 
     // A sells Bond 0 for 100
     // NOTE: Asset should remain in A's wallet until settlement
-    await clearingHouse.connect(userA).submitOrder(
+    await clearingHouse.connect(userA).submitMulticurrencySellOrder(
         bond.target, 
         tokenId, 
-        paymentToken.target, 
-        price, 
-        1, // Sell
+        [paymentToken.target], 
+        [price], 
         ethers.ZeroAddress
     );
     
@@ -75,12 +74,11 @@ describe("ClearingHouse", function () {
     expect(await bond.ownerOf(tokenId)).to.equal(userA.address);
 
     // B buys Bond 0 for 100
-    await clearingHouse.connect(userB).submitOrder(
+    await clearingHouse.connect(userB).submitBuyOrder(
         bond.target, 
         tokenId, 
         paymentToken.target, 
         price, 
-        0, // Buy
         ethers.ZeroAddress
     );
 
@@ -104,11 +102,11 @@ describe("ClearingHouse", function () {
     const tokenId = 0;
 
     // A sells
-    await clearingHouse.connect(userA).submitOrder(bond.target, tokenId, paymentToken.target, price, 1, ethers.ZeroAddress);
+    await clearingHouse.connect(userA).submitMulticurrencySellOrder(bond.target, tokenId, [paymentToken.target], [price], ethers.ZeroAddress);
     expect(await bond.ownerOf(tokenId)).to.equal(userA.address);
 
     // B buys (but cannot afford)
-    await clearingHouse.connect(userB).submitOrder(bond.target, tokenId, paymentToken.target, price, 0, ethers.ZeroAddress);
+    await clearingHouse.connect(userB).submitBuyOrder(bond.target, tokenId, paymentToken.target, price, ethers.ZeroAddress);
 
     // Cycle 1: Fail
     // During this cycle, A's asset should be pulled (locked), then payment fails.
