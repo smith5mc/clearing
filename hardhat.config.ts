@@ -23,10 +23,12 @@ export default defineConfig({
     hardhatMainnet: {
       type: "edr-simulated",
       chainType: "l1",
+      blockGasLimit: 30000000, // Increase block gas limit for simulation
     },
     hardhatOp: {
       type: "edr-simulated",
       chainType: "op",
+      blockGasLimit: 30000000,
     },
     sepolia: {
       type: "http",
