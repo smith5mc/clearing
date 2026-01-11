@@ -90,7 +90,7 @@ export default function App() {
     const graphWidth = dimensions.w - 440; // More space for order panel
     const graphHeight = dimensions.h;
     const centerX = graphWidth / 2;
-    const centerY = graphHeight / 2;
+    const centerY = (graphHeight / 2) - 80; // Move network up to make room for bottom panel
 
     const users = config.users.map((addr, i) => {
       const angle = (i / config.users.length) * 2 * Math.PI - Math.PI / 2;
@@ -1029,7 +1029,7 @@ export default function App() {
             <span style={{ width: 8, height: 8, background: COLORS.buy, borderRadius: 2 }} />
             BUY ({currentOrders.filter(o => o.type === 'BUY' && o.status === 'pending').length})
           </h3>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             {currentOrders.filter(o => o.type === 'BUY' && o.status === 'pending').length === 0 ? (
               <div style={{ fontSize: 10, color: COLORS.textMuted, fontStyle: 'italic', padding: '8px 0' }}>No buy orders</div>
             ) : (
@@ -1056,7 +1056,7 @@ export default function App() {
             <span style={{ width: 8, height: 8, background: COLORS.sell, borderRadius: 2 }} />
             SELL ({currentOrders.filter(o => o.type === 'SELL' && o.status === 'pending').length})
           </h3>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             {currentOrders.filter(o => o.type === 'SELL' && o.status === 'pending').length === 0 ? (
               <div style={{ fontSize: 10, color: COLORS.textMuted, fontStyle: 'italic', padding: '8px 0' }}>No sell orders</div>
             ) : (
@@ -1094,7 +1094,7 @@ export default function App() {
               }} />
               PENDING MATCHES
             </h3>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               {currentOrders.filter(o => o.matchedWith || o.status === 'matched').map(order => (
                 <OrderCard key={order.id} order={order} isMatch />
               ))}
@@ -1103,64 +1103,105 @@ export default function App() {
         )}
       </div>
 
-      {/* Matches Pending Indicator - Bottom Right */}
+      {/* Settlement Balances Panel - Bottom Center (Compact) */}
       {(() => {
-        const pendingMatches = currentOrders.filter(o => o.matchedWith && o.status === 'pending');
-        const matchCount = Math.floor(pendingMatches.length / 2); // Each match involves 2 orders
-        if (matchCount === 0) return null;
-        
+        const matchedOrders = currentOrders.filter(o => o.matchedWith && o.status === 'pending');
+        if (matchedOrders.length === 0) return null;
+
+        // Calculate gross and net balances per user
+        const userBalances: Record<string, { gross: number; pays: number; receives: number; userName: string }> = {};
+        const processedPairs = new Set<string>();
+
+        for (const order of matchedOrders) {
+          if (!order.matchedWith) continue;
+          const pairKey = [order.id, order.matchedWith].sort().join('-');
+          if (processedPairs.has(pairKey)) continue;
+          processedPairs.add(pairKey);
+
+          const matchedOrder = matchedOrders.find(o => o.id === order.matchedWith);
+          if (!matchedOrder) continue;
+
+          const buyOrder = order.type === 'BUY' ? order : matchedOrder;
+          const sellOrder = order.type === 'SELL' ? order : matchedOrder;
+          const price = parseFloat(buyOrder.price);
+
+          const userIndex = (userId: string) => {
+            const idx = config.users.findIndex(u => u.toLowerCase() === userId);
+            return idx >= 0 ? `U${idx + 1}` : userId.slice(0, 4);
+          };
+
+          if (!userBalances[buyOrder.userId]) {
+            userBalances[buyOrder.userId] = { gross: 0, pays: 0, receives: 0, userName: userIndex(buyOrder.userId) };
+          }
+          if (!userBalances[sellOrder.userId]) {
+            userBalances[sellOrder.userId] = { gross: 0, pays: 0, receives: 0, userName: userIndex(sellOrder.userId) };
+          }
+
+          userBalances[buyOrder.userId].pays += price;
+          userBalances[buyOrder.userId].gross += price;
+          userBalances[sellOrder.userId].receives += price;
+          userBalances[sellOrder.userId].gross += price;
+        }
+
+        const entries = Object.entries(userBalances);
+        if (entries.length === 0) return null;
+
         return (
           <div style={{
             position: 'fixed',
-            bottom: 20,
-            right: 210, // Account for right panel width
-            background: 'rgba(0, 30, 0, 0.95)',
-            border: `2px solid ${COLORS.match}`,
-            borderRadius: 10,
-            padding: '12px 20px',
-            display: 'flex',
-            alignItems: 'center',
-            gap: 12,
-            boxShadow: `0 0 20px rgba(0, 255, 0, 0.3), 0 4px 20px rgba(0, 0, 0, 0.5)`,
-            zIndex: 1000,
+            bottom: 12,
+            left: 275,
+            right: 205,
+            background: 'rgba(22, 27, 34, 0.95)',
+            border: `1px solid ${COLORS.panelBorder}`,
+            borderRadius: 8,
+            padding: '10px 16px',
+            boxShadow: '0 4px 16px rgba(0, 0, 0, 0.5)',
+            zIndex: 999,
           }}>
-            <div style={{
-              width: 12,
-              height: 12,
-              borderRadius: '50%',
-              background: COLORS.match,
-              boxShadow: `0 0 10px ${COLORS.match}`,
-              animation: 'pulse 1.5s ease-in-out infinite',
-            }} />
-            <div>
-              <div style={{ 
-                fontSize: 18, 
-                fontWeight: 700, 
-                color: COLORS.match,
-                lineHeight: 1,
-              }}>
-                {matchCount}
-              </div>
-              <div style={{ 
-                fontSize: 10, 
-                color: 'rgba(0, 255, 0, 0.7)',
-                textTransform: 'uppercase',
-                letterSpacing: '0.5px',
-              }}>
-                {matchCount === 1 ? 'Match' : 'Matches'} Pending
-              </div>
+            <div style={{ 
+              fontSize: 11, 
+              color: COLORS.textMuted, 
+              textTransform: 'uppercase', 
+              letterSpacing: '0.5px',
+              marginBottom: 8,
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+            }}>
+              <span>Settlement Obligations</span>
+              <span style={{ color: COLORS.match, fontWeight: 600 }}>{processedPairs.size} matches</span>
+            </div>
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+              {entries.map(([userId, balance]) => {
+                const net = balance.receives - balance.pays;
+                return (
+                  <div key={userId} style={{
+                    background: 'rgba(13, 17, 23, 0.8)',
+                    border: `1px solid ${net > 0 ? COLORS.buy : net < 0 ? COLORS.sell : COLORS.panelBorder}50`,
+                    borderRadius: 4,
+                    padding: '6px 10px',
+                    fontSize: 11,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 10,
+                  }}>
+                    <span style={{ color: '#58a6ff', fontWeight: 700 }}>{balance.userName}</span>
+                    <span style={{ color: COLORS.textMuted }}>Gross: <span style={{ color: '#c9d1d9' }}>{balance.gross.toFixed(0)}</span></span>
+                    <span style={{ 
+                      color: net > 0 ? COLORS.buy : net < 0 ? COLORS.sell : '#c9d1d9',
+                      fontWeight: 700,
+                    }}>
+                      Net: {net > 0 ? '+' : ''}{net.toFixed(0)}
+                    </span>
+                  </div>
+                );
+              })}
             </div>
           </div>
         );
       })()}
 
-      {/* CSS Animation for pulse */}
-      <style>{`
-        @keyframes pulse {
-          0%, 100% { opacity: 1; transform: scale(1); }
-          50% { opacity: 0.5; transform: scale(0.9); }
-        }
-      `}</style>
 
     </div>
   );
@@ -1225,26 +1266,26 @@ function OrderCard({ order, isMatch = false }: { order: Order; isMatch?: boolean
     <div style={{
       background: 'rgba(13, 17, 23, 0.8)',
       border: `1px solid ${borderColor}40`,
-      borderLeft: `2px solid ${borderColor}`,
-      borderRadius: 3,
-      padding: '4px 8px',
-      fontSize: 9,
+      borderLeft: `3px solid ${borderColor}`,
+      borderRadius: 4,
+      padding: '6px 10px',
+      fontSize: 11,
     }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
         <span style={{ fontWeight: 700, color: borderColor }}>#{order.orderId}</span>
-        <span style={{ color: COLORS.textMuted, fontSize: 8 }}>{order.asset}</span>
-        <span style={{ color: '#c9d1d9' }}>{order.price}</span>
-        <span style={{ color: COLORS.textMuted, fontSize: 8 }}>{formatAge(age)}</span>
+        <span style={{ color: COLORS.textMuted, flex: 1 }}>{order.asset}</span>
+        <span style={{ color: '#c9d1d9', fontWeight: 600 }}>{order.price}</span>
+        <span style={{ color: COLORS.textMuted }}>{formatAge(age)}</span>
       </div>
       {order.matchedWith && (
         <div style={{ 
-          marginTop: 3, 
-          paddingTop: 3, 
+          marginTop: 4, 
+          paddingTop: 4, 
           borderTop: `1px dashed ${COLORS.panelBorder}`,
           color: COLORS.match,
-          fontSize: 8,
+          fontSize: 10,
         }}>
-          ↔ #{order.matchedWith.replace('order-', '')}
+          ↔ Match #{order.matchedWith.replace('order-', '')}
         </div>
       )}
     </div>
