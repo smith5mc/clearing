@@ -160,7 +160,7 @@ contract ClearingHouse is ClearingHouseSettlement {
         }
 
         activeOrderIds.push(orderId);
-        emit OrderPlaced(orderId, msg.sender, asset, tokenId, Side.Sell, 0, counterparty); 
+        emit OrderPlaced(orderId, msg.sender, asset, tokenId, Side.Sell, prices[0], counterparty); 
     }
 
     // ============================================================

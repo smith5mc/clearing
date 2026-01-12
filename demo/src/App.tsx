@@ -98,6 +98,9 @@ export default function App() {
   const [paymentVersion, setPaymentVersion] = useState(0);
   const [swapVersion, setSwapVersion] = useState(0);
   const [eventTransport, setEventTransport] = useState<'ws-open' | 'ws-closed' | 'polling' | 'none'>('none');
+
+  // Price clustering for better matching
+  const marketPricesRef = useRef<Set<bigint>>(new Set());
   const [activeTab, setActiveTab] = useState<'dvp' | 'payments' | 'swaps'>('dvp');
   const bumpOrdersVersion = useCallback(() => setOrderVersion(v => v + 1), []);
   const bumpPaymentsVersion = useCallback(() => setPaymentVersion(v => v + 1), []);
@@ -756,24 +759,30 @@ export default function App() {
       if (existingOrder.tokenId !== newOrder.tokenId) continue;
       if (existingOrder.type === newOrder.type) continue; // Must be opposite sides
       
-      // For multicurrency sell orders, priceRaw is 0, so we check if there's 
-      // a potential match based on same asset/tokenId and opposite sides only
       const buyOrder = newOrder.type === 'BUY' ? newOrder : existingOrder;
       const sellOrder = newOrder.type === 'SELL' ? newOrder : existingOrder;
-      
-      // Only show as potential match if buy order has a non-zero price
-      // Actual price matching is verified by the smart contract
-      if (buyOrder.priceRaw > 0n) {
-        addLog(`Potential match: #${buyOrder.orderId} ↔ #${sellOrder.orderId} (pending settlement)`, 'match');
-        
-        // Mark both as potentially matched (visual indicator)
-        ordersRef.current = ordersRef.current.map(o => {
-          if (o.id === buyOrder.id) return { ...o, matchedWith: sellOrder.id };
-          if (o.id === sellOrder.id) return { ...o, matchedWith: buyOrder.id };
-          return o;
-        });
-        bumpOrdersVersion();
-        break;
+
+      // Check for potential matches (frontend visual indicator only)
+      // The contract does the actual price matching, so be more permissive here
+      if (buyOrder.priceRaw > 0n || sellOrder.priceRaw > 0n) {
+        // Check if prices are reasonably close (within 10% for visual indication)
+        const price1 = buyOrder.priceRaw || sellOrder.priceRaw;
+        const price2 = sellOrder.priceRaw || buyOrder.priceRaw;
+        const priceDiff = price1 > price2 ? price1 - price2 : price2 - price1;
+        const percentDiff = Number(priceDiff) / Number(price1);
+
+        if (percentDiff < 0.1) { // Within 10%
+          addLog(`Potential match: #${buyOrder.orderId} ↔ #${sellOrder.orderId} (pending settlement)`, 'match');
+
+          // Mark both as potentially matched (visual indicator)
+          ordersRef.current = ordersRef.current.map(o => {
+            if (o.id === buyOrder.id) return { ...o, matchedWith: sellOrder.id };
+            if (o.id === sellOrder.id) return { ...o, matchedWith: buyOrder.id };
+            return o;
+          });
+          bumpOrdersVersion();
+          break;
+        }
       }
     }
   }, [addLog]);
@@ -826,6 +835,18 @@ export default function App() {
         );
         bumpOrdersVersion();
       }, 2000);
+
+      // Remove settled order prices from market only if no remaining orders use them
+      const currentOrders = ordersRef.current;
+      const remainingOrders = currentOrders.filter(o => !settledIds.includes(o.id));
+      const remainingPrices = new Set(remainingOrders.map(o => o.priceRaw));
+
+      // Remove prices that are no longer used by any remaining orders
+      for (const price of marketPricesRef.current) {
+        if (!remainingPrices.has(price)) {
+          marketPricesRef.current.delete(price);
+        }
+      }
 
       // Phase 3: Remove
       setTimeout(() => {
@@ -1099,8 +1120,47 @@ export default function App() {
         if (transactionType < 0.4) {
           // DvP Order (40%)
           const isBuy = Math.random() > 0.5;
-          const price = ethers.parseUnits((10 + Math.floor(Math.random() * 50)).toString(), 18);
           const assetId = 1 + Math.floor(Math.random() * 3);
+
+          // Price clustering logic for better matching
+          let price;
+          const activePrices = Array.from(marketPricesRef.current);
+
+          if (activePrices.length > 0 && Math.random() < 0.95) {
+            // 95% chance to pick from existing market prices for clustering
+            // Bias toward prices that are already being used more
+            const currentOrders = ordersRef.current.filter(o => o.status === 'pending');
+            const priceUsage = new Map<bigint, number>();
+            for (const order of currentOrders) {
+              priceUsage.set(order.priceRaw, (priceUsage.get(order.priceRaw) || 0) + 1);
+            }
+
+            // Weight prices by their current usage (more used = more likely to be picked)
+            const weightedPrices: bigint[] = [];
+            for (const price of activePrices) {
+              const weight = Math.max(1, (priceUsage.get(price) || 0) * 2); // Double weight for each existing order
+              for (let i = 0; i < weight; i++) {
+                weightedPrices.push(price);
+              }
+            }
+
+            price = weightedPrices[Math.floor(Math.random() * weightedPrices.length)];
+            addLog(`Order using clustered price $${ethers.formatUnits(price, 18)} (usage: ${priceUsage.get(price) || 0})`, 'info');
+          } else {
+            // 20% chance to create a new market price
+            price = ethers.parseUnits((100 + Math.floor(Math.random() * 590)).toString(), 18);
+            marketPricesRef.current.add(price);
+
+            // Limit to 10 active prices to prevent unlimited growth
+            if (marketPricesRef.current.size > 10) {
+              const pricesArray = Array.from(marketPricesRef.current);
+              // Remove the oldest price (first in array)
+              marketPricesRef.current.delete(pricesArray[0]);
+            }
+
+            addLog(`Order creating new market price $${ethers.formatUnits(price, 18)}`, 'info');
+          }
+
           txType = isBuy ? 'BUY order' : 'SELL order';
 
           if (isBuy) {
@@ -1916,14 +1976,15 @@ function PaymentCard({ payment }: { payment: PaymentRequest }) {
       padding: '6px 10px',
       fontSize: 11,
     }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2 }}>
         <span style={{ fontWeight: 700, color: borderColor }}>#{payment.paymentId}</span>
-        <span style={{ color: COLORS.textMuted, flex: 1 }}>
-          {payment.sender === ethers.ZeroAddress ? 'anyone' : payment.sender.slice(0, 6) + '...'} →
-        </span>
-        <span style={{ color: COLORS.textMuted }}>{payment.recipient.slice(0, 6) + '...'}</span>
-        <span style={{ color: '#c9d1d9', fontWeight: 600 }}>{payment.amount}</span>
         <span style={{ color: COLORS.textMuted }}>{formatAge(age)}</span>
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <span style={{ color: COLORS.textMuted, fontSize: 10 }}>
+          {payment.sender === ethers.ZeroAddress ? 'anyone' : payment.sender.slice(0, 4) + '...'} → {payment.recipient.slice(0, 4) + '...'}
+        </span>
+        <span style={{ color: '#c9d1d9', fontWeight: 600, fontSize: 10 }}>{payment.amount}</span>
       </div>
       {payment.status === 'fulfilled' && payment.fulfilledToken && (
         <div style={{
