@@ -49,11 +49,6 @@ interface SwapOrder {
   matchedOrderId?: number;
 }
 
-interface UserConfig {
-  acceptedStablecoins: string[];
-  preferredStablecoin: string;
-  isConfigured: boolean;
-}
 
 interface LogEntry {
   time: string;
@@ -89,6 +84,8 @@ const COLORS = {
 export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const ordersRef = useRef<Order[]>([]);
+  const paymentsRef = useRef<PaymentRequest[]>([]);
+  const swapsRef = useRef<SwapOrder[]>([]);
   const animationRef = useRef<number>(0);
   const providerRef = useRef<any>(null);
   const contractsRef = useRef<any>({});
@@ -97,12 +94,19 @@ export default function App() {
   const [isAutoTraffic, setIsAutoTraffic] = useState(false);
   const autoTrafficRef = useRef<any>(null);
   const [dimensions, setDimensions] = useState({ w: window.innerWidth, h: window.innerHeight });
-  const [orderVersion, setOrderVersion] = useState(0); // Trigger re-renders when orders change
+  const [orderVersion, setOrderVersion] = useState(0);
+  const [paymentVersion, setPaymentVersion] = useState(0);
+  const [swapVersion, setSwapVersion] = useState(0);
   const [eventTransport, setEventTransport] = useState<'ws-open' | 'ws-closed' | 'polling' | 'none'>('none');
+  const [activeTab, setActiveTab] = useState<'dvp' | 'payments' | 'swaps'>('dvp');
   const bumpOrdersVersion = useCallback(() => setOrderVersion(v => v + 1), []);
+  const bumpPaymentsVersion = useCallback(() => setPaymentVersion(v => v + 1), []);
+  const bumpSwapsVersion = useCallback(() => setSwapVersion(v => v + 1), []);
 
   const lastPolledBlockRef = useRef<number>(0);
   const seenOrderIdsRef = useRef<Set<string>>(new Set());
+  const seenPaymentIdsRef = useRef<Set<string>>(new Set());
+  const seenSwapIdsRef = useRef<Set<string>>(new Set());
   const pollIntervalRef = useRef<any>(null);
 
   // --------------------------------------------------------------------------
@@ -246,29 +250,22 @@ export default function App() {
       ctx.restore();
     }
 
-    // Second pass: Draw Orders (Lines from user to clearing house)
-    for (const order of orders) {
-      const user = resolveUser(users, order.userId, centerX, centerY);
-
-      const startX = user.x;
-      const startY = user.y;
-      const endX = centerX;
-      const endY = centerY;
-
+    // Second pass: Draw Orders, Payments, and Swaps
+    const drawTransaction = (startX: number, startY: number, endX: number, endY: number, color: string, label: string, status: string, id: number, matched?: boolean) => {
       // Determine line style based on status
-      let lineColor = order.color;
+      let lineColor = color;
       let lineWidth = 2;
-      let glowColor = order.color;
+      let glowColor = color;
 
-      if (order.matchedWith && order.status === 'pending') {
+      if (matched && status === 'pending') {
         lineColor = COLORS.match;
         glowColor = COLORS.match;
         lineWidth = 3;
-      } else if (order.status === 'matched') {
+      } else if (status === 'matched' || status === 'fulfilled') {
         lineColor = COLORS.match;
         glowColor = COLORS.match;
         lineWidth = 4;
-      } else if (order.status === 'clearing') {
+      } else if (status === 'settled' || status === 'clearing') {
         lineColor = 'rgba(0, 255, 0, 0.3)';
         glowColor = COLORS.match;
         lineWidth = 5;
@@ -290,15 +287,15 @@ export default function App() {
       // Draw Label (at midpoint)
       const midX = (startX + endX) / 2;
       const midY = (startY + endY) / 2;
-      
+
       // Offset labels to avoid overlap
       const angle = Math.atan2(endY - startY, endX - startX);
       const labelOffsetX = Math.sin(angle) * 25;
       const labelOffsetY = -Math.cos(angle) * 25;
-      
-      const labelText = order.status === 'matched' 
-        ? '✓ SETTLED' 
-        : `#${order.orderId} ${order.type} ${order.price}`;
+
+      const labelText = (status === 'matched' || status === 'settled')
+        ? '✓ SETTLED'
+        : `${label} #${id}`;
 
       ctx.font = 'bold 10px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
       const textMetrics = ctx.measureText(labelText);
@@ -308,7 +305,7 @@ export default function App() {
       const labelY = midY + labelOffsetY - labelHeight / 2;
 
       // Label background with rounded corners
-      const labelBorderColor = order.matchedWith ? COLORS.match : lineColor;
+      const labelBorderColor = matched ? COLORS.match : lineColor;
       ctx.save();
       ctx.shadowColor = 'rgba(0, 0, 0, 0.5)';
       ctx.shadowBlur = 6;
@@ -326,6 +323,65 @@ export default function App() {
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText(labelText, midX + labelOffsetX, midY + labelOffsetY);
+    };
+
+    // Draw DvP Orders
+    for (const order of orders) {
+      const user = resolveUser(users, order.userId, centerX, centerY);
+      drawTransaction(
+        user.x, user.y, centerX, centerY,
+        order.color,
+        `${order.type} ${order.price}`,
+        order.status,
+        order.orderId,
+        !!order.matchedWith
+      );
+    }
+
+    // Draw Payment Requests
+    for (const payment of currentPayments) {
+      const senderUser = resolveUser(users, payment.sender, centerX, centerY);
+      const recipientUser = resolveUser(users, payment.recipient, centerX, centerY);
+
+      // Draw from sender to recipient, then to clearing house
+      const color = payment.status === 'fulfilled' ? '#0088ff' : '#00ff88';
+
+      if (payment.sender !== ethers.ZeroAddress) {
+        // Draw from sender to clearing house
+        drawTransaction(
+          senderUser.x, senderUser.y, centerX, centerY,
+          color,
+          `PAY ${payment.amount}`,
+          payment.status,
+          payment.paymentId,
+          false
+        );
+      } else {
+        // Open payment request - just to clearing house
+        drawTransaction(
+          recipientUser.x, recipientUser.y, centerX, centerY,
+          color,
+          `REQ ${payment.amount}`,
+          payment.status,
+          payment.paymentId,
+          false
+        );
+      }
+    }
+
+    // Draw Swap Orders
+    for (const swap of currentSwaps) {
+      const makerUser = resolveUser(users, swap.maker, centerX, centerY);
+      const color = swap.matchedOrderId ? COLORS.match : '#ff8800';
+
+      drawTransaction(
+        makerUser.x, makerUser.y, centerX, centerY,
+        color,
+        `SWAP ${swap.sendAmount}`,
+        swap.status,
+        swap.orderId,
+        !!swap.matchedOrderId
+      );
     }
 
     // Draw Users (outer nodes)
@@ -540,7 +596,6 @@ export default function App() {
           const orderType = side.toString() === "0" ? "BUY" : "SELL";
           const priceFmt = parseFloat(ethers.formatUnits(price, 18)).toFixed(2);
           const assetName = `Asset #${tokenId}`;
-          // Normalize addresses for consistent comparison
           const normalizedMaker = maker.toLowerCase();
 
           addLog(`Order #${id}: ${maker.slice(0, 6)}... ${orderType} ${assetName} @ ${priceFmt}`, 'info');
@@ -564,9 +619,101 @@ export default function App() {
 
           ordersRef.current = [...ordersRef.current, newOrder];
           bumpOrdersVersion();
-          
-          // Check for potential matches immediately
           checkForMatches(newOrder);
+        });
+
+        // Payment Events
+        chEvents.on("PaymentRequestCreated", (id, recipient, sender, amount) => {
+          const amountFmt = ethers.formatUnits(amount, 18);
+          const senderStr = sender === ethers.ZeroAddress ? 'anyone' : sender.slice(0, 6) + '...';
+
+          addLog(`Payment #${id}: ${senderStr} → ${recipient.slice(0, 6)}... (${amountFmt})`, 'payment');
+
+          const newPayment: PaymentRequest = {
+            id: `payment-${id}`,
+            paymentId: Number(id),
+            recipient: recipient.toLowerCase(),
+            sender: sender.toLowerCase(),
+            amount: amountFmt,
+            amountRaw: BigInt(amount.toString()),
+            status: 'pending',
+            createdAt: Date.now(),
+          };
+
+          paymentsRef.current = [...paymentsRef.current, newPayment];
+          bumpPaymentsVersion();
+        });
+
+        chEvents.on("PaymentRequestFulfilled", (id, sender, token) => {
+          addLog(`Payment #${id} fulfilled by ${sender.slice(0, 6)}... with ${token.slice(0, 6)}...`, 'payment');
+
+          paymentsRef.current = paymentsRef.current.map(p =>
+            p.paymentId === Number(id) ? {
+              ...p,
+              status: 'fulfilled' as const,
+              fulfilledToken: token.toLowerCase()
+            } : p
+          );
+          bumpPaymentsVersion();
+        });
+
+        chEvents.on("PaymentSettled", (id) => {
+          paymentsRef.current = paymentsRef.current.map(p =>
+            p.paymentId === Number(id) ? { ...p, status: 'settled' as const } : p
+          );
+          bumpPaymentsVersion();
+
+          // Remove settled payments after delay
+          setTimeout(() => {
+            paymentsRef.current = paymentsRef.current.filter(p => p.paymentId !== Number(id));
+            bumpPaymentsVersion();
+          }, 3000);
+        });
+
+        // Swap Events
+        chEvents.on("SwapOrderSubmitted", (id, maker, sendAmount, sendToken, receiveAmount) => {
+          const sendAmt = ethers.formatUnits(sendAmount, 18);
+          const recvAmt = ethers.formatUnits(receiveAmount, 18);
+
+          addLog(`Swap #${id}: ${maker.slice(0, 6)}... offers ${sendAmt} ${sendToken.slice(0, 6)}... for ${recvAmt}`, 'swap');
+
+          const newSwap: SwapOrder = {
+            id: `swap-${id}`,
+            orderId: Number(id),
+            maker: maker.toLowerCase(),
+            sendAmount: sendAmt,
+            sendAmountRaw: BigInt(sendAmount.toString()),
+            sendToken: sendToken.toLowerCase(),
+            receiveAmount: recvAmt,
+            receiveAmountRaw: BigInt(receiveAmount.toString()),
+            status: 'pending',
+            createdAt: Date.now(),
+          };
+
+          swapsRef.current = [...swapsRef.current, newSwap];
+          bumpSwapsVersion();
+        });
+
+        chEvents.on("SwapOrderMatched", (id, matchedId) => {
+          addLog(`Swap #${id} ↔ #${matchedId} matched!`, 'match');
+
+          swapsRef.current = swapsRef.current.map(s =>
+            s.orderId === Number(id) ? { ...s, matchedOrderId: Number(matchedId) } : s
+          );
+          bumpSwapsVersion();
+        });
+
+        chEvents.on("SwapSettled", (id) => {
+          swapsRef.current = swapsRef.current.map(s =>
+            s.orderId === Number(id) ? { ...s, status: 'settled' as const } : s
+          );
+          bumpSwapsVersion();
+
+          // Remove settled swaps after delay
+          setTimeout(() => {
+            swapsRef.current = swapsRef.current.filter(s => s.orderId !== Number(id));
+            bumpSwapsVersion();
+          }, 3000);
         });
 
         // Settlement Event (via WebSocket provider)
@@ -743,6 +890,104 @@ export default function App() {
       checkForMatches(newOrder);
     };
 
+    const handlePaymentRequestCreated = (id: bigint, recipient: string, sender: string, amount: bigint) => {
+      const paymentIdStr = id.toString();
+      if (seenPaymentIdsRef.current.has(paymentIdStr)) return;
+      seenPaymentIdsRef.current.add(paymentIdStr);
+
+      const amountFmt = ethers.formatUnits(amount, 18);
+      const senderStr = sender === ethers.ZeroAddress ? 'anyone' : sender.slice(0, 6) + '...';
+
+      addLog(`(poll) Payment #${id}: ${senderStr} → ${recipient.slice(0, 6)}... (${amountFmt})`, 'payment');
+
+      const newPayment: PaymentRequest = {
+        id: `payment-${id}`,
+        paymentId: Number(id),
+        recipient: recipient.toLowerCase(),
+        sender: sender.toLowerCase(),
+        amount: amountFmt,
+        amountRaw: BigInt(amount.toString()),
+        status: 'pending',
+        createdAt: Date.now(),
+      };
+
+      paymentsRef.current = [...paymentsRef.current, newPayment];
+      bumpPaymentsVersion();
+    };
+
+    const handlePaymentRequestFulfilled = (id: bigint, sender: string, token: string) => {
+      addLog(`(poll) Payment #${id} fulfilled by ${sender.slice(0, 6)}... with ${token.slice(0, 6)}...`, 'payment');
+
+      paymentsRef.current = paymentsRef.current.map(p =>
+        p.paymentId === Number(id) ? {
+          ...p,
+          status: 'fulfilled' as const,
+          fulfilledToken: token.toLowerCase()
+        } : p
+      );
+      bumpPaymentsVersion();
+    };
+
+    const handlePaymentSettled = (id: bigint) => {
+      paymentsRef.current = paymentsRef.current.map(p =>
+        p.paymentId === Number(id) ? { ...p, status: 'settled' as const } : p
+      );
+      bumpPaymentsVersion();
+
+      setTimeout(() => {
+        paymentsRef.current = paymentsRef.current.filter(p => p.paymentId !== Number(id));
+        bumpPaymentsVersion();
+      }, 3000);
+    };
+
+    const handleSwapOrderSubmitted = (id: bigint, maker: string, sendAmount: bigint, sendToken: string, receiveAmount: bigint) => {
+      const swapIdStr = id.toString();
+      if (seenSwapIdsRef.current.has(swapIdStr)) return;
+      seenSwapIdsRef.current.add(swapIdStr);
+
+      const sendAmt = ethers.formatUnits(sendAmount, 18);
+      const recvAmt = ethers.formatUnits(receiveAmount, 18);
+
+      addLog(`(poll) Swap #${id}: ${maker.slice(0, 6)}... offers ${sendAmt} ${sendToken.slice(0, 6)}... for ${recvAmt}`, 'swap');
+
+      const newSwap: SwapOrder = {
+        id: `swap-${id}`,
+        orderId: Number(id),
+        maker: maker.toLowerCase(),
+        sendAmount: sendAmt,
+        sendAmountRaw: BigInt(sendAmount.toString()),
+        sendToken: sendToken.toLowerCase(),
+        receiveAmount: recvAmt,
+        receiveAmountRaw: BigInt(receiveAmount.toString()),
+        status: 'pending',
+        createdAt: Date.now(),
+      };
+
+      swapsRef.current = [...swapsRef.current, newSwap];
+      bumpSwapsVersion();
+    };
+
+    const handleSwapOrderMatched = (id: bigint, matchedId: bigint) => {
+      addLog(`(poll) Swap #${id} ↔ #${matchedId} matched!`, 'match');
+
+      swapsRef.current = swapsRef.current.map(s =>
+        s.orderId === Number(id) ? { ...s, matchedOrderId: Number(matchedId) } : s
+      );
+      bumpSwapsVersion();
+    };
+
+    const handleSwapSettled = (id: bigint) => {
+      swapsRef.current = swapsRef.current.map(s =>
+        s.orderId === Number(id) ? { ...s, status: 'settled' as const } : s
+      );
+      bumpSwapsVersion();
+
+      setTimeout(() => {
+        swapsRef.current = swapsRef.current.filter(s => s.orderId !== Number(id));
+        bumpSwapsVersion();
+      }, 3000);
+    };
+
     const pollLogs = async () => {
       try {
         await ensureStartBlock();
@@ -766,6 +1011,24 @@ export default function App() {
             } else if (parsed.name === 'SettlementCompleted') {
               addLog('(poll) Settlement cycle executed!', 'success');
               await checkMatches();
+            } else if (parsed.name === 'PaymentRequestCreated') {
+              const [id, recipient, sender, amount] = parsed.args;
+              handlePaymentRequestCreated(id, recipient, sender, amount);
+            } else if (parsed.name === 'PaymentRequestFulfilled') {
+              const [id, sender, token] = parsed.args;
+              handlePaymentRequestFulfilled(id, sender, token);
+            } else if (parsed.name === 'PaymentSettled') {
+              const [id] = parsed.args;
+              handlePaymentSettled(id);
+            } else if (parsed.name === 'SwapOrderSubmitted') {
+              const [id, maker, sendAmount, sendToken, receiveAmount] = parsed.args;
+              handleSwapOrderSubmitted(id, maker, sendAmount, sendToken, receiveAmount);
+            } else if (parsed.name === 'SwapOrderMatched') {
+              const [id, matchedId] = parsed.args;
+              handleSwapOrderMatched(id, matchedId);
+            } else if (parsed.name === 'SwapSettled') {
+              const [id] = parsed.args;
+              handleSwapSettled(id);
             }
           } catch {
             // Skip unparseable logs
@@ -803,43 +1066,73 @@ export default function App() {
     const signer = await provider.getSigner(userAddress);
     const chWithSigner = contractsRef.current.ClearingHouse.connect(signer);
 
-    const isBuy = Math.random() > 0.5;
-    const price = ethers.parseUnits((10 + Math.floor(Math.random() * 50)).toString(), 18);
-    const assetId = 1 + Math.floor(Math.random() * 3);
-
-    addLog(`Submitting ${isBuy ? 'BUY' : 'SELL'} order...`, 'info');
+    // Randomly choose transaction type: 40% DvP, 35% Payment, 25% Swap
+    const transactionType = Math.random();
 
     try {
       let tx;
-      if (isBuy) {
-        tx = await chWithSigner.submitBuyOrder(
-          config.addresses.Bond,
-          assetId,
-          config.addresses.TokenA,
-          price,
-          ethers.ZeroAddress
+      let txType = 'unknown';
+
+      if (transactionType < 0.4) {
+        // DvP Order (40%)
+        const isBuy = Math.random() > 0.5;
+        const price = ethers.parseUnits((10 + Math.floor(Math.random() * 50)).toString(), 18);
+        const assetId = 1 + Math.floor(Math.random() * 3);
+        txType = isBuy ? 'BUY order' : 'SELL order';
+
+        if (isBuy) {
+          tx = await chWithSigner.submitBuyOrder(
+            config.addresses.Bond,
+            assetId,
+            config.addresses.TokenA,
+            price,
+            ethers.ZeroAddress
+          );
+        } else {
+          tx = await chWithSigner.submitMulticurrencySellOrder(
+            config.addresses.Bond,
+            assetId,
+            [config.addresses.TokenA],
+            [price],
+            ethers.ZeroAddress
+          );
+        }
+      } else if (transactionType < 0.75) {
+        // Payment Request (35%)
+        const amount = ethers.parseUnits((100 + Math.floor(Math.random() * 500)).toString(), 18);
+        const recipientIndex = Math.floor(Math.random() * config.users.length);
+        const recipientAddress = config.users[recipientIndex];
+        txType = 'payment request';
+
+        tx = await chWithSigner.createPaymentRequest(
+          recipientAddress,
+          amount
         );
       } else {
-        tx = await chWithSigner.submitMulticurrencySellOrder(
-          config.addresses.Bond,
-          assetId,
-          [config.addresses.TokenA],
-          [price],
-          ethers.ZeroAddress
+        // PvP Swap (25%)
+        const sendAmount = ethers.parseUnits((200 + Math.floor(Math.random() * 800)).toString(), 18);
+        const receiveAmount = ethers.parseUnits((180 + Math.floor(Math.random() * 720)).toString(), 18);
+        txType = 'swap order';
+
+        tx = await chWithSigner.submitSwapOrder(
+          sendAmount,
+          config.addresses.TokenA,
+          receiveAmount
         );
       }
-      addLog(`TX sent: ${tx.hash.slice(0, 10)}...`, 'info');
+
+      addLog(`TX sent: ${tx.hash.slice(0, 10)}... (${txType})`, 'info');
       const receipt = await tx.wait();
-      
+
       if (receipt.status === 0) {
         addLog(`TX REVERTED in block ${receipt.blockNumber}`, 'error');
       } else if (receipt.logs.length === 0) {
         addLog(`TX mined but no events emitted`, 'error');
       } else {
-        addLog(`Order confirmed in block ${receipt.blockNumber}`, 'success');
+        addLog(`${txType} confirmed in block ${receipt.blockNumber}`, 'success');
       }
     } catch (e: any) {
-      addLog(`Order failed: ${e.message?.slice(0, 50) || 'unknown error'}`, 'error');
+      addLog(`Transaction failed: ${e.message?.slice(0, 50) || 'unknown error'}`, 'error');
     }
   };
 
@@ -881,9 +1174,13 @@ export default function App() {
   // --------------------------------------------------------------------------
   const graphWidth = dimensions.w - 440; // Left sidebar + right panel
   const graphHeight = dimensions.h;
-  // orderVersion is used to trigger re-renders when orders change
+  // Trigger re-renders when data changes
   void orderVersion;
+  void paymentVersion;
+  void swapVersion;
   const currentOrders = [...ordersRef.current]; // Snapshot for rendering
+  const currentPayments = [...paymentsRef.current]; // Snapshot for rendering
+  const currentSwaps = [...swapsRef.current]; // Snapshot for rendering
 
   // Connection status indicator
   const connectionStatus = eventTransport === 'ws-open' ? 'WebSocket' : eventTransport === 'polling' ? 'Polling' : 'Connecting...';
@@ -958,14 +1255,43 @@ export default function App() {
           </div>
         </div>
 
+        {/* Transaction Type Tabs */}
+        <div style={{ display: 'flex', gap: 4, marginBottom: 16 }}>
+          <TabButton active={activeTab === 'dvp'} onClick={() => setActiveTab('dvp')}>
+            DvP Orders
+          </TabButton>
+          <TabButton active={activeTab === 'payments'} onClick={() => setActiveTab('payments')}>
+            Payments
+          </TabButton>
+          <TabButton active={activeTab === 'swaps'} onClick={() => setActiveTab('swaps')}>
+            PvP Swaps
+          </TabButton>
+        </div>
+
         {/* Legend */}
         <div style={{ background: 'rgba(13, 17, 23, 0.6)', padding: 14, borderRadius: 8, border: `1px solid ${COLORS.panelBorder}` }}>
           <h3 style={{ margin: '0 0 12px', fontSize: 11, color: COLORS.textMuted, textTransform: 'uppercase', letterSpacing: '0.5px' }}>Legend</h3>
           <LegendItem color={COLORS.center} label="Clearing House" />
           <LegendItem color={COLORS.user} label="Participant" />
-          <LegendItem color={COLORS.buy} label="Buy Order" isLine />
-          <LegendItem color={COLORS.sell} label="Sell Order" isLine />
-          <LegendItem color={COLORS.match} label="Matched" isLine />
+          {activeTab === 'dvp' && (
+            <>
+              <LegendItem color={COLORS.buy} label="Buy Order" isLine />
+              <LegendItem color={COLORS.sell} label="Sell Order" isLine />
+              <LegendItem color={COLORS.match} label="Matched" isLine />
+            </>
+          )}
+          {activeTab === 'payments' && (
+            <>
+              <LegendItem color="#00ff88" label="Payment Request" isLine />
+              <LegendItem color="#0088ff" label="Fulfilled" isLine />
+            </>
+          )}
+          {activeTab === 'swaps' && (
+            <>
+              <LegendItem color="#ff8800" label="Swap Order" isLine />
+              <LegendItem color={COLORS.match} label="Matched" isLine />
+            </>
+          )}
         </div>
 
         {/* Activity Log */}
@@ -1009,7 +1335,7 @@ export default function App() {
         style={{ display: 'block', flex: 1 }}
       />
 
-      {/* Right Panel - Order Book */}
+      {/* Right Panel - Transaction Details */}
       <div style={{
         width: 190,
         padding: 16,
@@ -1021,117 +1347,258 @@ export default function App() {
         overflowY: 'auto',
       }}>
         {/* Header */}
-        <div style={{ 
-          paddingBottom: 12, 
+        <div style={{
+          paddingBottom: 12,
           borderBottom: `1px solid ${COLORS.panelBorder}`,
         }}>
-          <h2 style={{ margin: 0, fontSize: 14, color: '#fff', fontWeight: 600 }}>Order Book</h2>
-          <div style={{ 
-            marginTop: 6, 
-            display: 'flex', 
-            alignItems: 'center', 
+          <h2 style={{ margin: 0, fontSize: 14, color: '#fff', fontWeight: 600 }}>
+            {activeTab === 'dvp' && 'DvP Order Book'}
+            {activeTab === 'payments' && 'Payment Requests'}
+            {activeTab === 'swaps' && 'PvP Swap Orders'}
+          </h2>
+          <div style={{
+            marginTop: 6,
+            display: 'flex',
+            alignItems: 'center',
             gap: 8,
           }}>
-            <span style={{ 
-              fontSize: 18, 
-              fontWeight: 700, 
-              color: currentOrders.length > 0 ? '#58a6ff' : COLORS.textMuted,
+            <span style={{
+              fontSize: 18,
+              fontWeight: 700,
+              color: (
+                (activeTab === 'dvp' && currentOrders.length > 0) ||
+                (activeTab === 'payments' && currentPayments.length > 0) ||
+                (activeTab === 'swaps' && currentSwaps.length > 0)
+              ) ? '#58a6ff' : COLORS.textMuted,
             }}>
-              {currentOrders.length}
+              {activeTab === 'dvp' && currentOrders.length}
+              {activeTab === 'payments' && currentPayments.length}
+              {activeTab === 'swaps' && currentSwaps.length}
             </span>
             <span style={{ fontSize: 11, color: COLORS.textMuted }}>
-              active order{currentOrders.length !== 1 ? 's' : ''}
+              active transaction{(currentOrders.length + currentPayments.length + currentSwaps.length) !== 1 ? 's' : ''}
             </span>
           </div>
         </div>
 
-        {/* Buy Orders */}
-        <div>
-          <h3 style={{ 
-            margin: '0 0 8px', 
-            fontSize: 10, 
-            color: COLORS.buy, 
-            display: 'flex', 
-            alignItems: 'center', 
-            gap: 6,
-            textTransform: 'uppercase',
-            letterSpacing: '0.5px',
-            fontWeight: 600,
-          }}>
-            <span style={{ width: 8, height: 8, background: COLORS.buy, borderRadius: 2 }} />
-            BUY ({currentOrders.filter(o => o.type === 'BUY' && o.status === 'pending').length})
-          </h3>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-            {currentOrders.filter(o => o.type === 'BUY' && o.status === 'pending').length === 0 ? (
-              <div style={{ fontSize: 10, color: COLORS.textMuted, fontStyle: 'italic', padding: '8px 0' }}>No buy orders</div>
-            ) : (
-              currentOrders.filter(o => o.type === 'BUY' && o.status === 'pending').map(order => (
-                <OrderCard key={order.id} order={order} />
-              ))
-            )}
-          </div>
-        </div>
-
-        {/* Sell Orders */}
-        <div>
-          <h3 style={{ 
-            margin: '0 0 8px', 
-            fontSize: 10, 
-            color: COLORS.sell, 
-            display: 'flex', 
-            alignItems: 'center', 
-            gap: 6,
-            textTransform: 'uppercase',
-            letterSpacing: '0.5px',
-            fontWeight: 600,
-          }}>
-            <span style={{ width: 8, height: 8, background: COLORS.sell, borderRadius: 2 }} />
-            SELL ({currentOrders.filter(o => o.type === 'SELL' && o.status === 'pending').length})
-          </h3>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-            {currentOrders.filter(o => o.type === 'SELL' && o.status === 'pending').length === 0 ? (
-              <div style={{ fontSize: 10, color: COLORS.textMuted, fontStyle: 'italic', padding: '8px 0' }}>No sell orders</div>
-            ) : (
-              currentOrders.filter(o => o.type === 'SELL' && o.status === 'pending').map(order => (
-                <OrderCard key={order.id} order={order} />
-              ))
-            )}
-          </div>
-        </div>
-
-        {/* Matched Orders */}
-        {currentOrders.filter(o => o.matchedWith || o.status === 'matched').length > 0 && (
-          <div style={{
-            marginTop: 4,
-            paddingTop: 12,
-            borderTop: `1px solid ${COLORS.panelBorder}`,
-          }}>
-            <h3 style={{ 
-              margin: '0 0 8px', 
-              fontSize: 10, 
-              color: COLORS.match, 
-              display: 'flex', 
-              alignItems: 'center', 
-              gap: 6,
-              textTransform: 'uppercase',
-              letterSpacing: '0.5px',
-              fontWeight: 600,
-            }}>
-              <span style={{ 
-                width: 8, 
-                height: 8, 
-                background: COLORS.match, 
-                borderRadius: '50%',
-                boxShadow: `0 0 6px ${COLORS.match}`,
-              }} />
-              PENDING MATCHES
-            </h3>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              {currentOrders.filter(o => o.matchedWith || o.status === 'matched').map(order => (
-                <OrderCard key={order.id} order={order} isMatch />
-              ))}
+        {/* DvP Orders Tab */}
+        {activeTab === 'dvp' && (
+          <>
+            {/* Buy Orders */}
+            <div>
+              <h3 style={{
+                margin: '0 0 8px',
+                fontSize: 10,
+                color: COLORS.buy,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                textTransform: 'uppercase',
+                letterSpacing: '0.5px',
+                fontWeight: 600,
+              }}>
+                <span style={{ width: 8, height: 8, background: COLORS.buy, borderRadius: 2 }} />
+                BUY ({currentOrders.filter(o => o.type === 'BUY' && o.status === 'pending').length})
+              </h3>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {currentOrders.filter(o => o.type === 'BUY' && o.status === 'pending').length === 0 ? (
+                  <div style={{ fontSize: 10, color: COLORS.textMuted, fontStyle: 'italic', padding: '8px 0' }}>No buy orders</div>
+                ) : (
+                  currentOrders.filter(o => o.type === 'BUY' && o.status === 'pending').map(order => (
+                    <OrderCard key={order.id} order={order} />
+                  ))
+                )}
+              </div>
             </div>
-          </div>
+
+            {/* Sell Orders */}
+            <div>
+              <h3 style={{
+                margin: '0 0 8px',
+                fontSize: 10,
+                color: COLORS.sell,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                textTransform: 'uppercase',
+                letterSpacing: '0.5px',
+                fontWeight: 600,
+              }}>
+                <span style={{ width: 8, height: 8, background: COLORS.sell, borderRadius: 2 }} />
+                SELL ({currentOrders.filter(o => o.type === 'SELL' && o.status === 'pending').length})
+              </h3>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {currentOrders.filter(o => o.type === 'SELL' && o.status === 'pending').length === 0 ? (
+                  <div style={{ fontSize: 10, color: COLORS.textMuted, fontStyle: 'italic', padding: '8px 0' }}>No sell orders</div>
+                ) : (
+                  currentOrders.filter(o => o.type === 'SELL' && o.status === 'pending').map(order => (
+                    <OrderCard key={order.id} order={order} />
+                  ))
+                )}
+              </div>
+            </div>
+
+            {/* Matched Orders */}
+            {currentOrders.filter(o => o.matchedWith || o.status === 'matched').length > 0 && (
+              <div style={{
+                marginTop: 4,
+                paddingTop: 12,
+                borderTop: `1px solid ${COLORS.panelBorder}`,
+              }}>
+                <h3 style={{
+                  margin: '0 0 8px',
+                  fontSize: 10,
+                  color: COLORS.match,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.5px',
+                  fontWeight: 600,
+                }}>
+                  <span style={{
+                    width: 8,
+                    height: 8,
+                    background: COLORS.match,
+                    borderRadius: '50%',
+                    boxShadow: `0 0 6px ${COLORS.match}`,
+                  }} />
+                  PENDING MATCHES
+                </h3>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {currentOrders.filter(o => o.matchedWith || o.status === 'matched').map(order => (
+                    <OrderCard key={order.id} order={order} isMatch />
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
+        )}
+
+        {/* Payments Tab */}
+        {activeTab === 'payments' && (
+          <>
+            {/* Pending Payment Requests */}
+            <div>
+              <h3 style={{
+                margin: '0 0 8px',
+                fontSize: 10,
+                color: '#00ff88',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                textTransform: 'uppercase',
+                letterSpacing: '0.5px',
+                fontWeight: 600,
+              }}>
+                <span style={{ width: 8, height: 8, background: '#00ff88', borderRadius: 2 }} />
+                PENDING ({currentPayments.filter(p => p.status === 'pending').length})
+              </h3>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {currentPayments.filter(p => p.status === 'pending').length === 0 ? (
+                  <div style={{ fontSize: 10, color: COLORS.textMuted, fontStyle: 'italic', padding: '8px 0' }}>No pending payments</div>
+                ) : (
+                  currentPayments.filter(p => p.status === 'pending').map(payment => (
+                    <PaymentCard key={payment.id} payment={payment} />
+                  ))
+                )}
+              </div>
+            </div>
+
+            {/* Fulfilled Payments */}
+            <div>
+              <h3 style={{
+                margin: '0 0 8px',
+                fontSize: 10,
+                color: '#0088ff',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                textTransform: 'uppercase',
+                letterSpacing: '0.5px',
+                fontWeight: 600,
+              }}>
+                <span style={{ width: 8, height: 8, background: '#0088ff', borderRadius: 2 }} />
+                FULFILLED ({currentPayments.filter(p => p.status === 'fulfilled').length})
+              </h3>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {currentPayments.filter(p => p.status === 'fulfilled').length === 0 ? (
+                  <div style={{ fontSize: 10, color: COLORS.textMuted, fontStyle: 'italic', padding: '8px 0' }}>No fulfilled payments</div>
+                ) : (
+                  currentPayments.filter(p => p.status === 'fulfilled').map(payment => (
+                    <PaymentCard key={payment.id} payment={payment} />
+                  ))
+                )}
+              </div>
+            </div>
+          </>
+        )}
+
+        {/* Swaps Tab */}
+        {activeTab === 'swaps' && (
+          <>
+            {/* Pending Swap Orders */}
+            <div>
+              <h3 style={{
+                margin: '0 0 8px',
+                fontSize: 10,
+                color: '#ff8800',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                textTransform: 'uppercase',
+                letterSpacing: '0.5px',
+                fontWeight: 600,
+              }}>
+                <span style={{ width: 8, height: 8, background: '#ff8800', borderRadius: 2 }} />
+                PENDING ({currentSwaps.filter(s => s.status === 'pending').length})
+              </h3>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {currentSwaps.filter(s => s.status === 'pending').length === 0 ? (
+                  <div style={{ fontSize: 10, color: COLORS.textMuted, fontStyle: 'italic', padding: '8px 0' }}>No pending swaps</div>
+                ) : (
+                  currentSwaps.filter(s => s.status === 'pending').map(swap => (
+                    <SwapCard key={swap.id} swap={swap} />
+                  ))
+                )}
+              </div>
+            </div>
+
+            {/* Matched Swaps */}
+            {currentSwaps.filter(s => s.matchedOrderId || s.status === 'matched').length > 0 && (
+              <div style={{
+                marginTop: 4,
+                paddingTop: 12,
+                borderTop: `1px solid ${COLORS.panelBorder}`,
+              }}>
+                <h3 style={{
+                  margin: '0 0 8px',
+                  fontSize: 10,
+                  color: COLORS.match,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.5px',
+                  fontWeight: 600,
+                }}>
+                  <span style={{
+                    width: 8,
+                    height: 8,
+                    background: COLORS.match,
+                    borderRadius: '50%',
+                    boxShadow: `0 0 6px ${COLORS.match}`,
+                  }} />
+                  MATCHED ({currentSwaps.filter(s => s.matchedOrderId && s.status === 'pending').length})
+                </h3>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {currentSwaps.filter(s => s.matchedOrderId && s.status === 'pending').map(swap => (
+                    <SwapCard key={swap.id} swap={swap} />
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
         )}
       </div>
 
@@ -1289,11 +1756,34 @@ function LegendItem({ color, label, isLine = false }: { color: string; label: st
   );
 }
 
+function TabButton({ children, active, onClick }: { children: React.ReactNode; active: boolean; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        flex: 1,
+        padding: '6px 8px',
+        fontSize: 10,
+        fontWeight: active ? 700 : 500,
+        border: 'none',
+        borderRadius: 4,
+        background: active ? COLORS.panelBg : 'rgba(13, 17, 23, 0.4)',
+        color: active ? COLORS.text : COLORS.textMuted,
+        cursor: 'pointer',
+        transition: 'all 0.15s ease',
+        borderBottom: active ? `2px solid ${COLORS.user}` : 'none',
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
 function OrderCard({ order, isMatch = false }: { order: Order; isMatch?: boolean }) {
   const borderColor = isMatch ? COLORS.match : (order.type === 'BUY' ? COLORS.buy : COLORS.sell);
   const age = Math.floor((Date.now() - order.createdAt) / 1000);
   const formatAge = (s: number) => s < 60 ? `${s}s` : `${Math.floor(s / 60)}m`;
-  
+
   return (
     <div style={{
       background: 'rgba(13, 17, 23, 0.8)',
@@ -1310,14 +1800,89 @@ function OrderCard({ order, isMatch = false }: { order: Order; isMatch?: boolean
         <span style={{ color: COLORS.textMuted }}>{formatAge(age)}</span>
       </div>
       {order.matchedWith && (
-        <div style={{ 
-          marginTop: 4, 
-          paddingTop: 4, 
+        <div style={{
+          marginTop: 4,
+          paddingTop: 4,
           borderTop: `1px dashed ${COLORS.panelBorder}`,
           color: COLORS.match,
           fontSize: 10,
         }}>
           ↔ Match #{order.matchedWith.replace('order-', '')}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PaymentCard({ payment }: { payment: PaymentRequest }) {
+  const borderColor = payment.status === 'fulfilled' ? '#0088ff' : '#00ff88';
+  const age = Math.floor((Date.now() - payment.createdAt) / 1000);
+  const formatAge = (s: number) => s < 60 ? `${s}s` : `${Math.floor(s / 60)}m`;
+
+  return (
+    <div style={{
+      background: 'rgba(13, 17, 23, 0.8)',
+      border: `1px solid ${borderColor}40`,
+      borderLeft: `3px solid ${borderColor}`,
+      borderRadius: 4,
+      padding: '6px 10px',
+      fontSize: 11,
+    }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+        <span style={{ fontWeight: 700, color: borderColor }}>#{payment.paymentId}</span>
+        <span style={{ color: COLORS.textMuted, flex: 1 }}>
+          {payment.sender === ethers.ZeroAddress ? 'anyone' : payment.sender.slice(0, 6) + '...'} →
+        </span>
+        <span style={{ color: COLORS.textMuted }}>{payment.recipient.slice(0, 6) + '...'}</span>
+        <span style={{ color: '#c9d1d9', fontWeight: 600 }}>{payment.amount}</span>
+        <span style={{ color: COLORS.textMuted }}>{formatAge(age)}</span>
+      </div>
+      {payment.status === 'fulfilled' && payment.fulfilledToken && (
+        <div style={{
+          marginTop: 4,
+          paddingTop: 4,
+          borderTop: `1px dashed ${COLORS.panelBorder}`,
+          color: '#0088ff',
+          fontSize: 10,
+        }}>
+          ✓ Fulfilled with {payment.fulfilledToken.slice(0, 6)}...
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SwapCard({ swap }: { swap: SwapOrder }) {
+  const borderColor = swap.matchedOrderId ? COLORS.match : '#ff8800';
+  const age = Math.floor((Date.now() - swap.createdAt) / 1000);
+  const formatAge = (s: number) => s < 60 ? `${s}s` : `${Math.floor(s / 60)}m`;
+
+  return (
+    <div style={{
+      background: 'rgba(13, 17, 23, 0.8)',
+      border: `1px solid ${borderColor}40`,
+      borderLeft: `3px solid ${borderColor}`,
+      borderRadius: 4,
+      padding: '6px 10px',
+      fontSize: 11,
+    }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+        <span style={{ fontWeight: 700, color: borderColor }}>#{swap.orderId}</span>
+        <span style={{ color: COLORS.textMuted, flex: 1 }}>
+          {swap.sendAmount} {swap.sendToken.slice(0, 4)} →
+        </span>
+        <span style={{ color: '#c9d1d9', fontWeight: 600 }}>{swap.receiveAmount}</span>
+        <span style={{ color: COLORS.textMuted }}>{formatAge(age)}</span>
+      </div>
+      {swap.matchedOrderId && (
+        <div style={{
+          marginTop: 4,
+          paddingTop: 4,
+          borderTop: `1px dashed ${COLORS.panelBorder}`,
+          color: COLORS.match,
+          fontSize: 10,
+        }}>
+          ↔ Match #{swap.matchedOrderId}
         </div>
       )}
     </div>

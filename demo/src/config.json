@@ -1566,6 +1566,44 @@
         "inputs": [
           {
             "indexed": true,
+            "internalType": "address",
+            "name": "user",
+            "type": "address"
+          },
+          {
+            "indexed": true,
+            "internalType": "address",
+            "name": "token",
+            "type": "address"
+          }
+        ],
+        "name": "AcceptedTokenAdded",
+        "type": "event"
+      },
+      {
+        "anonymous": false,
+        "inputs": [
+          {
+            "indexed": true,
+            "internalType": "address",
+            "name": "user",
+            "type": "address"
+          },
+          {
+            "indexed": true,
+            "internalType": "address",
+            "name": "token",
+            "type": "address"
+          }
+        ],
+        "name": "AcceptedTokenRemoved",
+        "type": "event"
+      },
+      {
+        "anonymous": false,
+        "inputs": [
+          {
+            "indexed": true,
             "internalType": "uint256",
             "name": "orderId",
             "type": "uint256"
@@ -1609,6 +1647,37 @@
           }
         ],
         "name": "AssetUnlocked",
+        "type": "event"
+      },
+      {
+        "anonymous": false,
+        "inputs": [
+          {
+            "indexed": true,
+            "internalType": "address",
+            "name": "user",
+            "type": "address"
+          },
+          {
+            "indexed": false,
+            "internalType": "int256",
+            "name": "aggregateNet",
+            "type": "int256"
+          },
+          {
+            "indexed": false,
+            "internalType": "address",
+            "name": "settledToken",
+            "type": "address"
+          },
+          {
+            "indexed": false,
+            "internalType": "uint256",
+            "name": "settledAmount",
+            "type": "uint256"
+          }
+        ],
+        "name": "CrossStablecoinNetted",
         "type": "event"
       },
       {
@@ -1685,11 +1754,11 @@
           {
             "indexed": true,
             "internalType": "uint256",
-            "name": "orderId",
+            "name": "paymentId",
             "type": "uint256"
           }
         ],
-        "name": "PaymentOrderCancelled",
+        "name": "PaymentRequestCancelled",
         "type": "event"
       },
       {
@@ -1698,25 +1767,19 @@
           {
             "indexed": true,
             "internalType": "uint256",
-            "name": "orderId",
+            "name": "paymentId",
             "type": "uint256"
-          },
-          {
-            "indexed": false,
-            "internalType": "enum ClearingHouseStorage.PaymentOrderType",
-            "name": "orderType",
-            "type": "uint8"
           },
           {
             "indexed": true,
             "internalType": "address",
-            "name": "maker",
+            "name": "recipient",
             "type": "address"
           },
           {
             "indexed": false,
             "internalType": "address",
-            "name": "token",
+            "name": "sender",
             "type": "address"
           },
           {
@@ -1724,21 +1787,9 @@
             "internalType": "uint256",
             "name": "amount",
             "type": "uint256"
-          },
-          {
-            "indexed": false,
-            "internalType": "address",
-            "name": "tokenWanted",
-            "type": "address"
-          },
-          {
-            "indexed": false,
-            "internalType": "address",
-            "name": "counterparty",
-            "type": "address"
           }
         ],
-        "name": "PaymentOrderCreated",
+        "name": "PaymentRequestCreated",
         "type": "event"
       },
       {
@@ -1747,17 +1798,23 @@
           {
             "indexed": true,
             "internalType": "uint256",
-            "name": "orderId1",
+            "name": "paymentId",
             "type": "uint256"
           },
           {
             "indexed": true,
-            "internalType": "uint256",
-            "name": "orderId2",
-            "type": "uint256"
+            "internalType": "address",
+            "name": "sender",
+            "type": "address"
+          },
+          {
+            "indexed": true,
+            "internalType": "address",
+            "name": "token",
+            "type": "address"
           }
         ],
-        "name": "PaymentOrderMatched",
+        "name": "PaymentRequestFulfilled",
         "type": "event"
       },
       {
@@ -1766,11 +1823,48 @@
           {
             "indexed": true,
             "internalType": "uint256",
-            "name": "orderId",
+            "name": "paymentId",
+            "type": "uint256"
+          },
+          {
+            "indexed": true,
+            "internalType": "address",
+            "name": "sender",
+            "type": "address"
+          },
+          {
+            "indexed": true,
+            "internalType": "address",
+            "name": "recipient",
+            "type": "address"
+          },
+          {
+            "indexed": false,
+            "internalType": "uint256",
+            "name": "amount",
             "type": "uint256"
           }
         ],
-        "name": "PaymentOrderSettled",
+        "name": "PaymentSettled",
+        "type": "event"
+      },
+      {
+        "anonymous": false,
+        "inputs": [
+          {
+            "indexed": true,
+            "internalType": "address",
+            "name": "user",
+            "type": "address"
+          },
+          {
+            "indexed": true,
+            "internalType": "address",
+            "name": "newToken",
+            "type": "address"
+          }
+        ],
+        "name": "PreferredTokenChanged",
         "type": "event"
       },
       {
@@ -1803,6 +1897,125 @@
           }
         ],
         "name": "SettlementFailed",
+        "type": "event"
+      },
+      {
+        "anonymous": false,
+        "inputs": [
+          {
+            "indexed": true,
+            "internalType": "uint256",
+            "name": "orderId",
+            "type": "uint256"
+          }
+        ],
+        "name": "SwapOrderCancelled",
+        "type": "event"
+      },
+      {
+        "anonymous": false,
+        "inputs": [
+          {
+            "indexed": true,
+            "internalType": "uint256",
+            "name": "orderId",
+            "type": "uint256"
+          },
+          {
+            "indexed": true,
+            "internalType": "uint256",
+            "name": "matchedOrderId",
+            "type": "uint256"
+          }
+        ],
+        "name": "SwapOrderMatched",
+        "type": "event"
+      },
+      {
+        "anonymous": false,
+        "inputs": [
+          {
+            "indexed": true,
+            "internalType": "uint256",
+            "name": "orderId",
+            "type": "uint256"
+          },
+          {
+            "indexed": true,
+            "internalType": "address",
+            "name": "maker",
+            "type": "address"
+          },
+          {
+            "indexed": false,
+            "internalType": "uint256",
+            "name": "sendAmount",
+            "type": "uint256"
+          },
+          {
+            "indexed": false,
+            "internalType": "address",
+            "name": "sendToken",
+            "type": "address"
+          },
+          {
+            "indexed": false,
+            "internalType": "uint256",
+            "name": "receiveAmount",
+            "type": "uint256"
+          }
+        ],
+        "name": "SwapOrderSubmitted",
+        "type": "event"
+      },
+      {
+        "anonymous": false,
+        "inputs": [
+          {
+            "indexed": true,
+            "internalType": "uint256",
+            "name": "orderId",
+            "type": "uint256"
+          },
+          {
+            "indexed": true,
+            "internalType": "address",
+            "name": "partyA",
+            "type": "address"
+          },
+          {
+            "indexed": true,
+            "internalType": "address",
+            "name": "partyB",
+            "type": "address"
+          }
+        ],
+        "name": "SwapSettled",
+        "type": "event"
+      },
+      {
+        "anonymous": false,
+        "inputs": [
+          {
+            "indexed": true,
+            "internalType": "address",
+            "name": "user",
+            "type": "address"
+          },
+          {
+            "indexed": false,
+            "internalType": "address[]",
+            "name": "acceptedTokens",
+            "type": "address[]"
+          },
+          {
+            "indexed": false,
+            "internalType": "address",
+            "name": "preferredToken",
+            "type": "address"
+          }
+        ],
+        "name": "UserConfigured",
         "type": "event"
       },
       {
@@ -1858,7 +2071,7 @@
             "type": "uint256"
           }
         ],
-        "name": "activePaymentOrderIds",
+        "name": "activePaymentIds",
         "outputs": [
           {
             "internalType": "uint256",
@@ -1873,13 +2086,19 @@
         "inputs": [
           {
             "internalType": "uint256",
-            "name": "orderId",
+            "name": "",
             "type": "uint256"
           }
         ],
-        "name": "cancelPaymentOrder",
-        "outputs": [],
-        "stateMutability": "nonpayable",
+        "name": "activeSwapOrderIds",
+        "outputs": [
+          {
+            "internalType": "uint256",
+            "name": "",
+            "type": "uint256"
+          }
+        ],
+        "stateMutability": "view",
         "type": "function"
       },
       {
@@ -1888,74 +2107,24 @@
             "internalType": "address",
             "name": "token",
             "type": "address"
-          },
-          {
-            "internalType": "uint256",
-            "name": "amount",
-            "type": "uint256"
-          },
-          {
-            "internalType": "address",
-            "name": "recipient",
-            "type": "address"
           }
         ],
-        "name": "createPayment",
-        "outputs": [
-          {
-            "internalType": "uint256",
-            "name": "",
-            "type": "uint256"
-          }
-        ],
+        "name": "addAcceptedStablecoin",
+        "outputs": [],
         "stateMutability": "nonpayable",
         "type": "function"
       },
       {
         "inputs": [
           {
-            "internalType": "address",
-            "name": "tokenOffered",
-            "type": "address"
-          },
-          {
             "internalType": "uint256",
-            "name": "amount",
-            "type": "uint256"
-          },
-          {
-            "internalType": "address",
-            "name": "tokenWanted",
-            "type": "address"
-          },
-          {
-            "internalType": "address",
-            "name": "counterparty",
-            "type": "address"
-          }
-        ],
-        "name": "createPvPSwap",
-        "outputs": [
-          {
-            "internalType": "uint256",
-            "name": "",
+            "name": "paymentId",
             "type": "uint256"
           }
         ],
+        "name": "cancelPaymentRequest",
+        "outputs": [],
         "stateMutability": "nonpayable",
-        "type": "function"
-      },
-      {
-        "inputs": [],
-        "name": "getActivePaymentOrderIds",
-        "outputs": [
-          {
-            "internalType": "uint256[]",
-            "name": "",
-            "type": "uint256[]"
-          }
-        ],
-        "stateMutability": "view",
         "type": "function"
       },
       {
@@ -1966,59 +2135,95 @@
             "type": "uint256"
           }
         ],
-        "name": "getPaymentOrder",
+        "name": "cancelSwapOrder",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+      },
+      {
+        "inputs": [
+          {
+            "internalType": "address[]",
+            "name": "tokens",
+            "type": "address[]"
+          },
+          {
+            "internalType": "address",
+            "name": "preferred",
+            "type": "address"
+          }
+        ],
+        "name": "configureAcceptedStablecoins",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+      },
+      {
+        "inputs": [
+          {
+            "internalType": "address",
+            "name": "sender",
+            "type": "address"
+          },
+          {
+            "internalType": "uint256",
+            "name": "amount",
+            "type": "uint256"
+          }
+        ],
+        "name": "createPaymentRequest",
         "outputs": [
           {
-            "components": [
-              {
-                "internalType": "uint256",
-                "name": "id",
-                "type": "uint256"
-              },
-              {
-                "internalType": "enum ClearingHouseStorage.PaymentOrderType",
-                "name": "orderType",
-                "type": "uint8"
-              },
-              {
-                "internalType": "address",
-                "name": "maker",
-                "type": "address"
-              },
-              {
-                "internalType": "address",
-                "name": "token",
-                "type": "address"
-              },
-              {
-                "internalType": "uint256",
-                "name": "amount",
-                "type": "uint256"
-              },
-              {
-                "internalType": "address",
-                "name": "tokenWanted",
-                "type": "address"
-              },
-              {
-                "internalType": "address",
-                "name": "counterparty",
-                "type": "address"
-              },
-              {
-                "internalType": "enum ClearingHouseStorage.PaymentOrderStatus",
-                "name": "status",
-                "type": "uint8"
-              },
-              {
-                "internalType": "uint256",
-                "name": "matchedWith",
-                "type": "uint256"
-              }
-            ],
-            "internalType": "struct ClearingHouseStorage.PaymentOrder",
-            "name": "",
-            "type": "tuple"
+            "internalType": "uint256",
+            "name": "paymentId",
+            "type": "uint256"
+          }
+        ],
+        "stateMutability": "nonpayable",
+        "type": "function"
+      },
+      {
+        "inputs": [
+          {
+            "internalType": "uint256",
+            "name": "paymentId",
+            "type": "uint256"
+          },
+          {
+            "internalType": "address",
+            "name": "token",
+            "type": "address"
+          }
+        ],
+        "name": "fulfillPaymentRequest",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+      },
+      {
+        "inputs": [
+          {
+            "internalType": "address",
+            "name": "user",
+            "type": "address"
+          }
+        ],
+        "name": "getUserConfig",
+        "outputs": [
+          {
+            "internalType": "address[]",
+            "name": "acceptedStablecoins",
+            "type": "address[]"
+          },
+          {
+            "internalType": "address",
+            "name": "preferredStablecoin",
+            "type": "address"
+          },
+          {
+            "internalType": "bool",
+            "name": "isConfigured",
+            "type": "bool"
           }
         ],
         "stateMutability": "view",
@@ -2052,7 +2257,20 @@
       },
       {
         "inputs": [],
-        "name": "nextPaymentOrderId",
+        "name": "nextPaymentId",
+        "outputs": [
+          {
+            "internalType": "uint256",
+            "name": "",
+            "type": "uint256"
+          }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+      },
+      {
+        "inputs": [],
+        "name": "nextSwapOrderId",
         "outputs": [
           {
             "internalType": "uint256",
@@ -2187,7 +2405,7 @@
             "type": "uint256"
           }
         ],
-        "name": "paymentOrders",
+        "name": "paymentRequests",
         "outputs": [
           {
             "internalType": "uint256",
@@ -2195,18 +2413,13 @@
             "type": "uint256"
           },
           {
-            "internalType": "enum ClearingHouseStorage.PaymentOrderType",
-            "name": "orderType",
-            "type": "uint8"
-          },
-          {
             "internalType": "address",
-            "name": "maker",
+            "name": "recipient",
             "type": "address"
           },
           {
             "internalType": "address",
-            "name": "token",
+            "name": "sender",
             "type": "address"
           },
           {
@@ -2216,22 +2429,22 @@
           },
           {
             "internalType": "address",
-            "name": "tokenWanted",
+            "name": "fulfilledToken",
             "type": "address"
           },
           {
-            "internalType": "address",
-            "name": "counterparty",
-            "type": "address"
+            "internalType": "bool",
+            "name": "active",
+            "type": "bool"
           },
           {
-            "internalType": "enum ClearingHouseStorage.PaymentOrderStatus",
-            "name": "status",
-            "type": "uint8"
+            "internalType": "bool",
+            "name": "fulfilled",
+            "type": "bool"
           },
           {
             "internalType": "uint256",
-            "name": "matchedWith",
+            "name": "failedSettlementCycles",
             "type": "uint256"
           }
         ],
@@ -2241,6 +2454,19 @@
       {
         "inputs": [],
         "name": "performSettlement",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+      },
+      {
+        "inputs": [
+          {
+            "internalType": "address",
+            "name": "token",
+            "type": "address"
+          }
+        ],
+        "name": "removeAcceptedStablecoin",
         "outputs": [],
         "stateMutability": "nonpayable",
         "type": "function"
@@ -2274,6 +2500,19 @@
           }
         ],
         "stateMutability": "view",
+        "type": "function"
+      },
+      {
+        "inputs": [
+          {
+            "internalType": "address",
+            "name": "token",
+            "type": "address"
+          }
+        ],
+        "name": "setPreferredStablecoin",
+        "outputs": [],
+        "stateMutability": "nonpayable",
         "type": "function"
       },
       {
@@ -2345,6 +2584,89 @@
       {
         "inputs": [
           {
+            "internalType": "uint256",
+            "name": "sendAmount",
+            "type": "uint256"
+          },
+          {
+            "internalType": "address",
+            "name": "sendToken",
+            "type": "address"
+          },
+          {
+            "internalType": "uint256",
+            "name": "receiveAmount",
+            "type": "uint256"
+          }
+        ],
+        "name": "submitSwapOrder",
+        "outputs": [
+          {
+            "internalType": "uint256",
+            "name": "orderId",
+            "type": "uint256"
+          }
+        ],
+        "stateMutability": "nonpayable",
+        "type": "function"
+      },
+      {
+        "inputs": [
+          {
+            "internalType": "uint256",
+            "name": "",
+            "type": "uint256"
+          }
+        ],
+        "name": "swapOrders",
+        "outputs": [
+          {
+            "internalType": "uint256",
+            "name": "id",
+            "type": "uint256"
+          },
+          {
+            "internalType": "address",
+            "name": "maker",
+            "type": "address"
+          },
+          {
+            "internalType": "uint256",
+            "name": "sendAmount",
+            "type": "uint256"
+          },
+          {
+            "internalType": "address",
+            "name": "sendToken",
+            "type": "address"
+          },
+          {
+            "internalType": "uint256",
+            "name": "receiveAmount",
+            "type": "uint256"
+          },
+          {
+            "internalType": "bool",
+            "name": "active",
+            "type": "bool"
+          },
+          {
+            "internalType": "uint256",
+            "name": "matchedOrderId",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "failedSettlementCycles",
+            "type": "uint256"
+          }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+      },
+      {
+        "inputs": [
+          {
             "internalType": "address",
             "name": "newOwner",
             "type": "address"
@@ -2353,6 +2675,30 @@
         "name": "transferOwnership",
         "outputs": [],
         "stateMutability": "nonpayable",
+        "type": "function"
+      },
+      {
+        "inputs": [
+          {
+            "internalType": "address",
+            "name": "user",
+            "type": "address"
+          },
+          {
+            "internalType": "address",
+            "name": "token",
+            "type": "address"
+          }
+        ],
+        "name": "userAcceptsToken",
+        "outputs": [
+          {
+            "internalType": "bool",
+            "name": "",
+            "type": "bool"
+          }
+        ],
+        "stateMutability": "view",
         "type": "function"
       }
     ]
