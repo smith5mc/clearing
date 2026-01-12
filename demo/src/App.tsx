@@ -23,10 +23,42 @@ interface Order {
   matchedWith?: string; // ID of matched order
 }
 
+interface PaymentRequest {
+  id: string;
+  paymentId: number;
+  recipient: string;
+  sender: string;
+  amount: string;
+  amountRaw: bigint;
+  status: 'pending' | 'fulfilled' | 'settled' | 'cancelled';
+  createdAt: number;
+  fulfilledToken?: string;
+}
+
+interface SwapOrder {
+  id: string;
+  orderId: number;
+  maker: string;
+  sendAmount: string;
+  sendAmountRaw: bigint;
+  sendToken: string;
+  receiveAmount: string;
+  receiveAmountRaw: bigint;
+  status: 'pending' | 'matched' | 'settled';
+  createdAt: number;
+  matchedOrderId?: number;
+}
+
+interface UserConfig {
+  acceptedStablecoins: string[];
+  preferredStablecoin: string;
+  isConfigured: boolean;
+}
+
 interface LogEntry {
   time: string;
   msg: string;
-  type: 'info' | 'success' | 'error' | 'match';
+  type: 'info' | 'success' | 'error' | 'match' | 'payment' | 'swap';
 }
 
 // ============================================================================

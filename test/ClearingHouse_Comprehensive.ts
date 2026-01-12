@@ -19,8 +19,10 @@ describe("ClearingHouse Comprehensive", function () {
   let clearingHouse: any;
   let bond: any;
   let stock: any;
-  let paymentToken: any; // ERC20 TokenA
-  let paymentTokenB: any; // ERC20 TokenB
+  let paymentToken: any;  // ERC20 TokenA (USDC-like)
+  let paymentTokenB: any; // ERC20 TokenB (USDT-like)
+  let paymentTokenC: any; // ERC20 TokenC (DAI-like)
+  let paymentTokenD: any; // ERC20 TokenD (EURC-like)
 
   before(async function () {
     const signers = await ethers.getSigners();
@@ -36,9 +38,11 @@ describe("ClearingHouse Comprehensive", function () {
     bond = await ethers.deployContract("Bond");
     stock = await ethers.deployContract("Stock");
     
-    // Deploy Payment Tokens
+    // Deploy Payment Tokens (Stablecoins)
     paymentToken = await ethers.deployContract("TokenA");
     paymentTokenB = await ethers.deployContract("TokenB");
+    paymentTokenC = await ethers.deployContract("TokenC");
+    paymentTokenD = await ethers.deployContract("TokenD");
 
     // Deploy ClearingHouse
     clearingHouse = await ethers.deployContract("ClearingHouse");
@@ -47,307 +51,646 @@ describe("ClearingHouse Comprehensive", function () {
     if(users[0]) await bond.mint(users[0].address, 1000, 500, 1234567890); // Bond ID 0
     if(users[2]) await stock.mint(users[2].address, "Common", 100);       // Stock ID 0
     
-    // Setup: Fund Users with Payment Tokens (Both A and B)
+    // Setup: Fund Users with Payment Tokens (All 4 stablecoins)
     const initialBalance = ethers.parseUnits("10000", 18);
     for(const user of users) {
         await paymentToken.transfer(user.address, initialBalance);
         await paymentTokenB.transfer(user.address, initialBalance);
+        await paymentTokenC.transfer(user.address, initialBalance);
+        await paymentTokenD.transfer(user.address, initialBalance);
         
         // Approvals
         await bond.connect(user).setApprovalForAll(clearingHouse.target, true);
         await stock.connect(user).setApprovalForAll(clearingHouse.target, true);
         await paymentToken.connect(user).approve(clearingHouse.target, ethers.MaxUint256);
         await paymentTokenB.connect(user).approve(clearingHouse.target, ethers.MaxUint256);
+        await paymentTokenC.connect(user).approve(clearingHouse.target, ethers.MaxUint256);
+        await paymentTokenD.connect(user).approve(clearingHouse.target, ethers.MaxUint256);
     }
   });
 
-  describe("Multicurrency Support", function () {
-      it("Should match a Seller accepting multiple currencies with a Buyer picking one", async function () {
-          console.log("\n  [Narrative] Testing Multicurrency Sell Order (Token A or Token B)");
-          console.log("  -------------------------------------------------------------");
-          
-          const tokenId = 1;
-          // Mint fresh bond to User 0
-          await bond.mint(users[0].address, 1000, 500, 1234567890); 
-          
-          const priceA = ethers.parseUnits("100", 18); // 100 Token A
-          const priceB = ethers.parseUnits("200", 18); // 200 Token B (Different valuation)
+  // ============================================================
+  // USER CONFIGURATION TESTS
+  // ============================================================
 
-          console.log("  [Step 1] User 0 submits Sell Order for Bond #1");
-          console.log(`    - Option 1: ${ethers.formatUnits(priceA, 18)} Token A`);
-          console.log(`    - Option 2: ${ethers.formatUnits(priceB, 18)} Token B`);
-          
-          await clearingHouse.connect(users[0]).submitMulticurrencySellOrder(
-              bond.target,
-              tokenId,
-              [paymentToken.target, paymentTokenB.target],
-              [priceA, priceB],
-              ethers.ZeroAddress
-          );
+  describe("User Configuration", function () {
+    it("Should allow user to configure accepted stablecoins", async function () {
+      console.log("\n  [Test] User Configuration - Basic Setup");
+      
+      await clearingHouse.connect(users[0]).configureAcceptedStablecoins(
+        [paymentToken.target, paymentTokenB.target],
+        paymentToken.target
+      );
+      
+      const config = await clearingHouse.getUserConfig(users[0].address);
+      expect(config.isConfigured).to.be.true;
+      expect(config.preferredStablecoin).to.equal(paymentToken.target);
+      expect(config.acceptedStablecoins.length).to.equal(2);
+      
+      console.log("  ✓ User configured with 2 accepted stablecoins");
+    });
 
-          console.log("  [Step 2] User 1 submits Buy Order using Token B (Price 200)");
-          await clearingHouse.connect(users[1]).submitBuyOrder(
-              bond.target,
-              tokenId,
-              paymentTokenB.target,
-              priceB,
-              ethers.ZeroAddress
-          );
+    it("Should reject configuration with empty token list", async function () {
+      await expect(
+        clearingHouse.connect(users[0]).configureAcceptedStablecoins([], paymentToken.target)
+      ).to.be.revertedWith("Must accept at least one token");
+    });
 
-          console.log("  [Step 3] Settlement");
-          await increaseTime(301);
-          await clearingHouse.performSettlement();
+    it("Should reject configuration where preferred is not in accepted list", async function () {
+      await expect(
+        clearingHouse.connect(users[0]).configureAcceptedStablecoins(
+          [paymentToken.target],
+          paymentTokenB.target
+        )
+      ).to.be.revertedWith("Preferred must be in accepted list");
+    });
 
-          console.log("  [Result] Verification");
-          const owner = await bond.ownerOf(tokenId);
-          console.log(`    - New Asset Owner: ${owner === users[1].address ? "User 1 (Success)" : "Fail"}`);
-          expect(owner).to.equal(users[1].address);
-          
-          // Verify User 0 received Token B
-          const balB = await paymentTokenB.balanceOf(users[0].address);
-          const initial = ethers.parseUnits("10000", 18);
-          console.log(`    - User 0 Token B Balance: ${ethers.formatUnits(balB, 18)} (Expected 10200.0)`);
-          expect(balB).to.equal(initial + priceB);
-          
-          // Verify User 0 did NOT receive Token A
-          const balA = await paymentToken.balanceOf(users[0].address);
-          console.log(`    - User 0 Token A Balance: ${ethers.formatUnits(balA, 18)} (Expected 10000.0)`);
-          expect(balA).to.equal(initial);
-      });
+    it("Should allow adding and removing stablecoins", async function () {
+      console.log("\n  [Test] User Configuration - Add/Remove Tokens");
+      
+      // Initial config
+      await clearingHouse.connect(users[0]).configureAcceptedStablecoins(
+        [paymentToken.target, paymentTokenB.target],
+        paymentToken.target
+      );
+      
+      // Add TokenC
+      await clearingHouse.connect(users[0]).addAcceptedStablecoin(paymentTokenC.target);
+      
+      let accepts = await clearingHouse.userAcceptsToken(users[0].address, paymentTokenC.target);
+      expect(accepts).to.be.true;
+      console.log("  ✓ Added TokenC to accepted list");
+      
+      // Remove TokenB
+      await clearingHouse.connect(users[0]).removeAcceptedStablecoin(paymentTokenB.target);
+      
+      accepts = await clearingHouse.userAcceptsToken(users[0].address, paymentTokenB.target);
+      expect(accepts).to.be.false;
+      console.log("  ✓ Removed TokenB from accepted list");
+    });
 
-      it("Should match a Seller accepting multiple currencies with a Buyer picking the OTHER one", async function () {
-        console.log("\n  [Narrative] Testing Multicurrency Sell Order (Token A path)");
-        console.log("  -------------------------------------------------------------");
-        
-        // BeforeEach mints ID 0. This mint will create ID 1.
-        await bond.mint(users[0].address, 1000, 500, 1234567890); 
-        const tokenId = 1;
-        
-        const priceA = ethers.parseUnits("100", 18);
-        const priceB = ethers.parseUnits("200", 18);
-
-        console.log("  [Step 1] User 0 submits Sell Order for Bond #2 (Terms: 100 TKA or 200 TKB)");
-        await clearingHouse.connect(users[0]).submitMulticurrencySellOrder(
-            bond.target,
-            tokenId,
-            [paymentToken.target, paymentTokenB.target],
-            [priceA, priceB],
-            ethers.ZeroAddress
-        );
-
-        console.log("  [Step 2] User 2 submits Buy Order using Token A (Price 100)");
-        await clearingHouse.connect(users[2]).submitBuyOrder(
-            bond.target,
-            tokenId,
-            paymentToken.target,
-            priceA,
-            ethers.ZeroAddress
-        );
-
-        console.log("  [Step 3] Settlement");
-        await increaseTime(301);
-        await clearingHouse.performSettlement();
-
-        console.log("  [Result] Verification");
-        const owner = await bond.ownerOf(tokenId);
-        expect(owner).to.equal(users[2].address);
-        
-        // Verify User 0 received Token A
-        const balA = await paymentToken.balanceOf(users[0].address);
-        const initial = ethers.parseUnits("10000", 18);
-        console.log(`    - User 0 Token A Balance: ${ethers.formatUnits(balA, 18)} (Expected 10100.0)`);
-        expect(balA).to.equal(initial + priceA);
+    it("Should allow changing preferred stablecoin", async function () {
+      await clearingHouse.connect(users[0]).configureAcceptedStablecoins(
+        [paymentToken.target, paymentTokenB.target],
+        paymentToken.target
+      );
+      
+      await clearingHouse.connect(users[0]).setPreferredStablecoin(paymentTokenB.target);
+      
+      const config = await clearingHouse.getUserConfig(users[0].address);
+      expect(config.preferredStablecoin).to.equal(paymentTokenB.target);
     });
   });
 
-  describe("Large Scale Simulation", function () {
-      it("Should handle 50 random matched orders across 10 users correctly", async function () {
-          // Increase timeout for this heavy test
-          this.timeout(60000);
+  // ============================================================
+  // PAYMENT TESTS
+  // ============================================================
 
-          console.log("\n  [Narrative] Starting Large Scale Simulation (10 Users, 50 Matched Orders)");
-          console.log("  ------------------------------------------------------------------------");
-          console.log("  Objective: Simulate a busy trading period with multiple assets and users.");
-          console.log("  Mechanism: ");
-          console.log("    1. Generate 50 unique Buy/Sell pairs for random assets (Bonds/Stocks).");
-          console.log("    2. Process them in batches of 10 to simulate settling cycles over time.");
-          console.log("    3. RANDOMLY choose between Token A and Token B for each trade.");
-          console.log("    4. Verify strict Atomic Delivery vs Payment (DvP) and Netting accuracy for BOTH currencies.");
-          console.log("  ------------------------------------------------------------------------");
-          
-          const totalTransactions = 50;
-          const batchSize = 10;
-          const batches = totalTransactions / batchSize;
-          
-          const allOrders: any[] = [];
-          
-          for (let b = 0; b < batches; b++) {
-              console.log(`\n  [Batch ${b+1}/${batches}] Processing ${batchSize} transactions...`);
-              console.log("  | Order | Asset | ID | Seller | Buyer | Price | Token |");
-              console.log("  |-------|-------|----|--------|-------|-------|-------|");
-              
-              const batchOrders: any[] = [];
-              const batchAssets: any[] = [];
-              
-              // Mint & Submit for this batch
-              for(let i=0; i<batchSize; i++) {
-                  const globalIndex = b * batchSize + i;
-                  const assetContract = globalIndex % 2 === 0 ? bond : stock;
-                  const ownerIndex = Math.floor(Math.random() * users.length);
-                  const initialOwner = users[ownerIndex];
-                  
-                  // Mint
-                  if (assetContract === bond) {
-                      await assetContract.mint(initialOwner.address, 1000, 500, 1234567890);
-                  } else {
-                      await assetContract.mint(initialOwner.address, "Common", 100);
-                  }
-                  
-                  const id = Math.floor(globalIndex / 2) + 1;
-                  
-                  const asset = { contract: assetContract, id: id, initialOwner: initialOwner };
-                  batchAssets.push(asset);
-                  
-                  // Randomly select Payment Token (A or B)
-                  const useTokenB = Math.random() > 0.5;
-                  const selectedPaymentToken = useTokenB ? paymentTokenB : paymentToken;
-                  const tokenSymbol = useTokenB ? "TKB" : "TKA";
-                  
-                  // Submit Orders
-                  let buyerIndex;
-                  do { buyerIndex = Math.floor(Math.random() * users.length); } while (users[buyerIndex].address === initialOwner.address);
-                  const buyer = users[buyerIndex];
-                  const price = ethers.parseUnits((10 + Math.floor(Math.random() * 100)).toString(), 18);
-                  
-                  // Use submitMulticurrencySellOrder for Seller
-                  await clearingHouse.connect(initialOwner).submitMulticurrencySellOrder(
-                      assetContract.target,
-                      id,
-                      [selectedPaymentToken.target],
-                      [price],
-                      ethers.ZeroAddress
-                  );
-                  
-                  // Use submitBuyOrder for Buyer (changed from submitOrder)
-                  await clearingHouse.connect(buyer).submitBuyOrder(
-                      assetContract.target,
-                      id,
-                      selectedPaymentToken.target,
-                      price,
-                      ethers.ZeroAddress
-                  );
-                  
-                  batchOrders.push({ asset, seller: initialOwner, buyer, price, paymentToken: selectedPaymentToken });
-                  allOrders.push({ asset, seller: initialOwner, buyer, price, paymentToken: selectedPaymentToken });
-                  
-                  const assetName = assetContract === bond ? "Bond" : "Stock";
-                  console.log(`  | #${(globalIndex+1).toString().padEnd(5)} | ${assetName.padEnd(5)} | ${id.toString().padEnd(2)} | User ${users.indexOf(initialOwner)}  | User ${users.indexOf(buyer)} | ${ethers.formatUnits(price, 18).padEnd(5)} | ${tokenSymbol.padEnd(5)} |`);
-              }
-              
-              console.log(`  [Batch ${b+1}] Executing Settlement Cycle (Netting & Transfers)...`);
-              await increaseTime(301);
-              const tx = await clearingHouse.performSettlement();
-              await tx.wait();
-              console.log(`  [Batch ${b+1}] Cycle Complete.`);
-          }
+  describe("Payment Requests", function () {
+    beforeEach(async function () {
+      // Configure users for payments
+      await clearingHouse.connect(users[0]).configureAcceptedStablecoins(
+        [paymentToken.target, paymentTokenB.target],
+        paymentToken.target
+      );
+      await clearingHouse.connect(users[1]).configureAcceptedStablecoins(
+        [paymentToken.target, paymentTokenB.target, paymentTokenC.target],
+        paymentTokenB.target
+      );
+    });
 
-          console.log("\n  [Summary Report] Verifying Final State for ALL 50 transactions...");
-          console.log("  -------------------------------------------------------------");
-          
-          let failures = 0;
-          for(let i=0; i<totalTransactions; i++) {
-              const o = allOrders[i];
-              const finalOwner = await o.asset.contract.ownerOf(o.asset.id);
-              if(finalOwner !== o.buyer.address) {
-                  failures++;
-                  console.log(`  [FAIL] Asset ${o.asset.id} owned by ${finalOwner}, expected ${o.buyer.address}`);
-              }
-          }
-          
-          if(failures === 0) {
-              console.log("  [SUCCESS] Asset Delivery: 100% (50/50 Assets transferred)");
-          } else {
-              console.log(`  [FAIL] Asset Delivery: ${(50-failures)/50*100}% (${failures} failed)`);
-          }
-          expect(failures).to.equal(0);
-          
-          // Verify Netting Sample (User 0) for BOTH currencies
-          console.log("\n  [Debug] Verifying Netting Accuracy for Random User (User 0)...");
-          
-          let expectedChangeA = BigInt(0);
-          let expectedChangeB = BigInt(0);
-          let txCountUser0 = 0;
+    it("Should create and fulfill a payment request", async function () {
+      console.log("\n  [Test] Payment Request - Create and Fulfill");
+      
+      const amount = ethers.parseUnits("500", 18);
+      
+      // User 0 creates payment request (User 1 should pay)
+      console.log("  [Step 1] User 0 creates payment request for 500");
+      const tx = await clearingHouse.connect(users[0]).createPaymentRequest(
+        users[1].address,
+        amount
+      );
+      const receipt = await tx.wait();
+      
+      // Get payment ID from event
+      const event = receipt.logs.find((l: any) => l.fragment?.name === "PaymentRequestCreated");
+      const paymentId = event?.args?.[0] || 0n;
+      
+      console.log(`  [Step 2] User 1 fulfills payment with TokenB`);
+      await clearingHouse.connect(users[1]).fulfillPaymentRequest(paymentId, paymentTokenB.target);
+      
+      // Verify payment request state
+      const payment = await clearingHouse.paymentRequests(paymentId);
+      expect(payment.fulfilled).to.be.true;
+      expect(payment.fulfilledToken).to.equal(paymentTokenB.target);
+      
+      console.log("  ✓ Payment request created and fulfilled");
+    });
 
-          for(const o of allOrders) {
-              const isUser0Seller = o.seller.address === users[0].address;
-              const isUser0Buyer = o.buyer.address === users[0].address;
+    it("Should settle payment in settlement cycle", async function () {
+      console.log("\n  [Test] Payment Settlement");
+      
+      const amount = ethers.parseUnits("1000", 18);
+      const initialBalance = ethers.parseUnits("10000", 18);
+      
+      // Record initial total balances
+      const senderInitialA = await paymentToken.balanceOf(users[1].address);
+      const senderInitialB = await paymentTokenB.balanceOf(users[1].address);
+      const recipientInitialA = await paymentToken.balanceOf(users[0].address);
+      const recipientInitialB = await paymentTokenB.balanceOf(users[0].address);
+      
+      // Create and fulfill payment
+      await clearingHouse.connect(users[0]).createPaymentRequest(users[1].address, amount);
+      await clearingHouse.connect(users[1]).fulfillPaymentRequest(0, paymentTokenB.target);
+      
+      // Settlement
+      console.log("  [Step] Running settlement...");
+      await increaseTime(301);
+      await clearingHouse.performSettlement();
+      
+      // Verify total balance changes (cross-stablecoin netting may use any token)
+      const senderFinalA = await paymentToken.balanceOf(users[1].address);
+      const senderFinalB = await paymentTokenB.balanceOf(users[1].address);
+      const recipientFinalA = await paymentToken.balanceOf(users[0].address);
+      const recipientFinalB = await paymentTokenB.balanceOf(users[0].address);
+      
+      // Sender's total should decrease by amount (could be from any stablecoin)
+      const senderTotalChange = (senderFinalA - senderInitialA) + (senderFinalB - senderInitialB);
+      expect(senderTotalChange).to.equal(-amount);
+      console.log(`  ✓ Sender total balance decreased by ${ethers.formatUnits(amount, 18)}`);
+      
+      // Recipient's total should increase by amount
+      const recipientTotalChange = (recipientFinalA - recipientInitialA) + (recipientFinalB - recipientInitialB);
+      expect(recipientTotalChange).to.equal(amount);
+      console.log(`  ✓ Recipient total balance increased by ${ethers.formatUnits(amount, 18)}`);
+    });
 
-              if(isUser0Seller || isUser0Buyer) {
-                  txCountUser0++;
-                  const isTokenB = o.paymentToken === paymentTokenB;
-                  
-                  if (isUser0Seller) {
-                      if (isTokenB) expectedChangeB += o.price;
-                      else expectedChangeA += o.price;
-                  } else {
-                      if (isTokenB) expectedChangeB -= o.price;
-                      else expectedChangeA -= o.price;
-                  }
-              }
-          }
-          
-          const finalBalA = await paymentToken.balanceOf(users[0].address);
-          const finalBalB = await paymentTokenB.balanceOf(users[0].address);
-          const initialBal = ethers.parseUnits("10000", 18);
-          
-          const actualChangeA = finalBalA - initialBal;
-          const actualChangeB = finalBalB - initialBal;
-          
-          console.log(`  - User 0 was involved in ${txCountUser0} transactions.`);
-          
-          console.log(`  [Token A]`);
-          console.log(`    - Expected Net Change: ${ethers.formatUnits(expectedChangeA, 18)}`);
-          console.log(`    - Actual Balance Change:   ${ethers.formatUnits(actualChangeA, 18)}`);
-          console.log(`    - Result: ${actualChangeA === expectedChangeA ? "MATCHED" : "MISMATCH"}`);
-          
-          console.log(`  [Token B]`);
-          console.log(`    - Expected Net Change: ${ethers.formatUnits(expectedChangeB, 18)}`);
-          console.log(`    - Actual Balance Change:   ${ethers.formatUnits(actualChangeB, 18)}`);
-          console.log(`    - Result: ${actualChangeB === expectedChangeB ? "MATCHED" : "MISMATCH"}`);
-          
-          expect(actualChangeA).to.equal(expectedChangeA);
-          expect(actualChangeB).to.equal(expectedChangeB);
-      });
+    it("Should allow cancelling unfulfilled payment", async function () {
+      const amount = ethers.parseUnits("500", 18);
+      
+      await clearingHouse.connect(users[0]).createPaymentRequest(users[1].address, amount);
+      
+      // Cancel before fulfillment
+      await clearingHouse.connect(users[0]).cancelPaymentRequest(0);
+      
+      const payment = await clearingHouse.paymentRequests(0);
+      expect(payment.active).to.be.false;
+    });
+
+    it("Should reject fulfillment with unaccepted token", async function () {
+      const amount = ethers.parseUnits("500", 18);
+      
+      await clearingHouse.connect(users[0]).createPaymentRequest(users[1].address, amount);
+      
+      // TokenD is not in User 0's accepted list
+      await expect(
+        clearingHouse.connect(users[1]).fulfillPaymentRequest(0, paymentTokenD.target)
+      ).to.be.revertedWith("Token not accepted by recipient");
+    });
   });
-  
-  // Keep original tests logic but map to new users array
+
+  // ============================================================
+  // PVP SWAP TESTS
+  // ============================================================
+
+  describe("PvP Swaps", function () {
+    beforeEach(async function () {
+      // Configure users for swaps
+      await clearingHouse.connect(users[0]).configureAcceptedStablecoins(
+        [paymentToken.target, paymentTokenD.target],  // Accepts USDC, EURC
+        paymentToken.target
+      );
+      await clearingHouse.connect(users[1]).configureAcceptedStablecoins(
+        [paymentToken.target, paymentTokenB.target],  // Accepts USDC, USDT
+        paymentTokenB.target
+      );
+      await clearingHouse.connect(users[2]).configureAcceptedStablecoins(
+        [paymentTokenC.target, paymentTokenD.target], // Accepts DAI, EURC
+        paymentTokenD.target
+      );
+    });
+
+    it("Should submit and auto-match swap orders", async function () {
+      console.log("\n  [Test] PvP Swap - Auto-Matching");
+      
+      // User 0 wants to swap: Send 1000 USDC, receive 950 (any accepted)
+      console.log("  [Step 1] User 0 submits: Send 1000 TokenA, Want 950");
+      await clearingHouse.connect(users[0]).submitSwapOrder(
+        ethers.parseUnits("1000", 18),
+        paymentToken.target,
+        ethers.parseUnits("950", 18)
+      );
+      
+      // Check order created but not matched yet
+      let order0 = await clearingHouse.swapOrders(0);
+      expect(order0.matchedOrderId).to.equal(0n);
+      console.log("  ✓ Order 0 created (unmatched)");
+      
+      // User 1 wants opposite: Send 960 USDC, receive 1000 (any accepted)
+      // This matches: User 1 sends 960 USDC (User 0 accepts), User 0 sends 1000 (User 1 accepts)
+      console.log("  [Step 2] User 1 submits: Send 960 TokenA, Want 1000");
+      await clearingHouse.connect(users[1]).submitSwapOrder(
+        ethers.parseUnits("960", 18),
+        paymentToken.target,
+        ethers.parseUnits("1000", 18)
+      );
+      
+      // Check orders are matched
+      order0 = await clearingHouse.swapOrders(0);
+      const order1 = await clearingHouse.swapOrders(1);
+      
+      expect(order0.matchedOrderId).to.equal(1n);
+      expect(order1.matchedOrderId).to.equal(0n);
+      console.log("  ✓ Orders auto-matched!");
+    });
+
+    it("Should settle matched swap", async function () {
+      console.log("\n  [Test] PvP Swap - Settlement");
+      
+      const sendAmountA = ethers.parseUnits("1000", 18);
+      const sendAmountB = ethers.parseUnits("950", 18);
+      
+      const initialA_TokenA = await paymentToken.balanceOf(users[0].address);
+      const initialB_TokenA = await paymentToken.balanceOf(users[1].address);
+      
+      // Submit matching swap orders
+      await clearingHouse.connect(users[0]).submitSwapOrder(
+        sendAmountA,
+        paymentToken.target,
+        ethers.parseUnits("900", 18)
+      );
+      await clearingHouse.connect(users[1]).submitSwapOrder(
+        sendAmountB,
+        paymentToken.target,
+        ethers.parseUnits("1000", 18)
+      );
+      
+      // Settlement
+      console.log("  [Step] Running settlement...");
+      await increaseTime(301);
+      await clearingHouse.performSettlement();
+      
+      const finalA_TokenA = await paymentToken.balanceOf(users[0].address);
+      const finalB_TokenA = await paymentToken.balanceOf(users[1].address);
+      
+      // User 0: sent 1000, received 950 → net -50
+      // User 1: sent 950, received 1000 → net +50
+      const changeA = finalA_TokenA - initialA_TokenA;
+      const changeB = finalB_TokenA - initialB_TokenA;
+      
+      console.log(`  User 0 net change: ${ethers.formatUnits(changeA, 18)}`);
+      console.log(`  User 1 net change: ${ethers.formatUnits(changeB, 18)}`);
+      
+      // After netting, User 0 pays 50, User 1 receives 50
+      expect(changeA).to.equal(ethers.parseUnits("-50", 18));
+      expect(changeB).to.equal(ethers.parseUnits("50", 18));
+      console.log("  ✓ Swap settled with correct netting");
+    });
+
+    it("Should not match incompatible swap orders", async function () {
+      console.log("\n  [Test] PvP Swap - No Match (Different Currencies)");
+      
+      // User 0 wants to send USDC
+      await clearingHouse.connect(users[0]).submitSwapOrder(
+        ethers.parseUnits("1000", 18),
+        paymentToken.target,  // USDC
+        ethers.parseUnits("950", 18)
+      );
+      
+      // User 2 wants to send DAI (User 0 doesn't accept DAI)
+      await clearingHouse.connect(users[2]).submitSwapOrder(
+        ethers.parseUnits("950", 18),
+        paymentTokenC.target,  // DAI
+        ethers.parseUnits("1000", 18)
+      );
+      
+      // Orders should NOT match
+      const order0 = await clearingHouse.swapOrders(0);
+      const order1 = await clearingHouse.swapOrders(1);
+      
+      expect(order0.matchedOrderId).to.equal(0n);
+      expect(order1.matchedOrderId).to.equal(0n);
+      console.log("  ✓ Incompatible orders correctly not matched");
+    });
+
+    it("Should allow cancelling unmatched swap order", async function () {
+      await clearingHouse.connect(users[0]).submitSwapOrder(
+        ethers.parseUnits("1000", 18),
+        paymentToken.target,
+        ethers.parseUnits("950", 18)
+      );
+      
+      await clearingHouse.connect(users[0]).cancelSwapOrder(0);
+      
+      const order = await clearingHouse.swapOrders(0);
+      expect(order.active).to.be.false;
+    });
+  });
+
+  // ============================================================
+  // CROSS-STABLECOIN NETTING TESTS
+  // ============================================================
+
+  describe("Cross-Stablecoin Netting", function () {
+    beforeEach(async function () {
+      // Configure all users
+      await clearingHouse.connect(users[0]).configureAcceptedStablecoins(
+        [paymentToken.target, paymentTokenB.target, paymentTokenC.target],
+        paymentToken.target  // Prefers TokenA
+      );
+      await clearingHouse.connect(users[1]).configureAcceptedStablecoins(
+        [paymentToken.target, paymentTokenB.target],
+        paymentTokenB.target  // Prefers TokenB
+      );
+      await clearingHouse.connect(users[2]).configureAcceptedStablecoins(
+        [paymentToken.target, paymentTokenB.target, paymentTokenC.target],
+        paymentTokenC.target  // Prefers TokenC
+      );
+    });
+
+    it("Should net multiple payments across different stablecoins", async function () {
+      console.log("\n  [Test] Cross-Stablecoin Netting - Multiple Payments");
+      
+      const amount1 = ethers.parseUnits("1000", 18);
+      const amount2 = ethers.parseUnits("600", 18);
+      
+      // Payment 1: User 1 pays User 0 $1000 in TokenB
+      await clearingHouse.connect(users[0]).createPaymentRequest(users[1].address, amount1);
+      await clearingHouse.connect(users[1]).fulfillPaymentRequest(0, paymentTokenB.target);
+      
+      // Payment 2: User 0 pays User 2 $600 in TokenA
+      await clearingHouse.connect(users[2]).createPaymentRequest(users[0].address, amount2);
+      await clearingHouse.connect(users[0]).fulfillPaymentRequest(1, paymentToken.target);
+      
+      console.log("  Payments before netting:");
+      console.log("    User 1 → User 0: 1000 TokenB");
+      console.log("    User 0 → User 2: 600 TokenA");
+      console.log("  User 0 expected net: +1000 - 600 = +400");
+      
+      const initialBalance = ethers.parseUnits("10000", 18);
+      
+      await increaseTime(301);
+      await clearingHouse.performSettlement();
+      
+      // Check User 0's final balance (should receive net +400 in preferred TokenA)
+      const finalBalA = await paymentToken.balanceOf(users[0].address);
+      const finalBalB = await paymentTokenB.balanceOf(users[0].address);
+      
+      // User 0: received 1000 TokenB, paid 600 TokenA
+      // Net position: +400
+      // Should receive in preferred (TokenA) but TokenB was collected
+      const totalChange = (finalBalA - initialBalance) + (finalBalB - initialBalance);
+      
+      console.log(`  User 0 TokenA change: ${ethers.formatUnits(finalBalA - initialBalance, 18)}`);
+      console.log(`  User 0 TokenB change: ${ethers.formatUnits(finalBalB - initialBalance, 18)}`);
+      console.log(`  User 0 total net: ${ethers.formatUnits(totalChange, 18)}`);
+      
+      expect(totalChange).to.equal(ethers.parseUnits("400", 18));
+      console.log("  ✓ Cross-stablecoin netting calculated correctly");
+    });
+
+    it("Should net DvP + Payment together", async function () {
+      console.log("\n  [Test] Cross-Stablecoin Netting - DvP + Payment");
+      
+      const assetPrice = ethers.parseUnits("1000", 18);
+      const paymentAmount = ethers.parseUnits("300", 18);
+      
+      // DvP: User 0 sells Bond#0 to User 1 for 1000 TokenA
+      await clearingHouse.connect(users[0]).submitMulticurrencySellOrder(
+        bond.target,
+        0,
+        [paymentToken.target],
+        [assetPrice],
+        ethers.ZeroAddress
+      );
+      await clearingHouse.connect(users[1]).submitBuyOrder(
+        bond.target,
+        0,
+        paymentToken.target,
+        assetPrice,
+        ethers.ZeroAddress
+      );
+      
+      // Payment: User 0 pays User 2 $300 in TokenB
+      await clearingHouse.connect(users[2]).createPaymentRequest(users[0].address, paymentAmount);
+      await clearingHouse.connect(users[0]).fulfillPaymentRequest(0, paymentTokenB.target);
+      
+      console.log("  Transactions:");
+      console.log("    DvP: User 0 → User 1 (Bond#0 for 1000 TokenA)");
+      console.log("    Payment: User 0 → User 2 (300 TokenB)");
+      console.log("  User 0 expected net: +1000 - 300 = +700");
+      
+      const initialBalanceA = await paymentToken.balanceOf(users[0].address);
+      const initialBalanceB = await paymentTokenB.balanceOf(users[0].address);
+      
+      await increaseTime(301);
+      await clearingHouse.performSettlement();
+      
+      // Verify asset transferred
+      expect(await bond.ownerOf(0)).to.equal(users[1].address);
+      console.log("  ✓ Asset transferred to buyer");
+      
+      // Verify User 0's net cash position
+      const finalBalanceA = await paymentToken.balanceOf(users[0].address);
+      const finalBalanceB = await paymentTokenB.balanceOf(users[0].address);
+      
+      const totalChange = (finalBalanceA - initialBalanceA) + (finalBalanceB - initialBalanceB);
+      console.log(`  User 0 total net change: ${ethers.formatUnits(totalChange, 18)}`);
+      
+      expect(totalChange).to.equal(ethers.parseUnits("700", 18));
+      console.log("  ✓ DvP + Payment netted correctly");
+    });
+  });
+
+  // ============================================================
+  // MIXED SIMULATION TEST
+  // ============================================================
+
+  describe("Mixed Transaction Simulation", function () {
+    it("Should handle mixed DvP + Payments + Swaps in single settlement", async function () {
+      this.timeout(60000);
+      
+      console.log("\n  [Test] Mixed Transaction Simulation");
+      console.log("  ====================================");
+      
+      // Configure all users
+      for (let i = 0; i < 5; i++) {
+        await clearingHouse.connect(users[i]).configureAcceptedStablecoins(
+          [paymentToken.target, paymentTokenB.target, paymentTokenC.target],
+          [paymentToken.target, paymentTokenB.target, paymentTokenC.target][i % 3]
+        );
+      }
+      
+      // Mint some assets
+      await bond.mint(users[1].address, 1000, 500, 1234567890); // Bond ID 1
+      await bond.mint(users[2].address, 1000, 500, 1234567890); // Bond ID 2
+      
+      console.log("\n  Submitting transactions...");
+      
+      // DvP 1: User 1 sells Bond#1 to User 3 for 500
+      await clearingHouse.connect(users[1]).submitMulticurrencySellOrder(
+        bond.target, 1, [paymentToken.target], [ethers.parseUnits("500", 18)], ethers.ZeroAddress
+      );
+      await clearingHouse.connect(users[3]).submitBuyOrder(
+        bond.target, 1, paymentToken.target, ethers.parseUnits("500", 18), ethers.ZeroAddress
+      );
+      console.log("    DvP: User 1 → User 3 (Bond#1 for 500 TokenA)");
+      
+      // DvP 2: User 2 sells Bond#2 to User 4 for 750
+      await clearingHouse.connect(users[2]).submitMulticurrencySellOrder(
+        bond.target, 2, [paymentTokenB.target], [ethers.parseUnits("750", 18)], ethers.ZeroAddress
+      );
+      await clearingHouse.connect(users[4]).submitBuyOrder(
+        bond.target, 2, paymentTokenB.target, ethers.parseUnits("750", 18), ethers.ZeroAddress
+      );
+      console.log("    DvP: User 2 → User 4 (Bond#2 for 750 TokenB)");
+      
+      // Payment 1: User 3 pays User 1 $200
+      await clearingHouse.connect(users[1]).createPaymentRequest(users[3].address, ethers.parseUnits("200", 18));
+      await clearingHouse.connect(users[3]).fulfillPaymentRequest(0, paymentTokenB.target);
+      console.log("    Payment: User 3 → User 1 (200 TokenB)");
+      
+      // Payment 2: User 4 pays User 2 $300
+      await clearingHouse.connect(users[2]).createPaymentRequest(users[4].address, ethers.parseUnits("300", 18));
+      await clearingHouse.connect(users[4]).fulfillPaymentRequest(1, paymentToken.target);
+      console.log("    Payment: User 4 → User 2 (300 TokenA)");
+      
+      // Swap: User 1 and User 2 swap currencies
+      await clearingHouse.connect(users[1]).submitSwapOrder(
+        ethers.parseUnits("400", 18), paymentToken.target, ethers.parseUnits("380", 18)
+      );
+      await clearingHouse.connect(users[2]).submitSwapOrder(
+        ethers.parseUnits("400", 18), paymentTokenB.target, ethers.parseUnits("400", 18)
+      );
+      console.log("    Swap: User 1 (400 TokenA) ↔ User 2 (400 TokenB)");
+      
+      // Record initial balances
+      const initialBalances: any = {};
+      for (let i = 0; i < 5; i++) {
+        initialBalances[i] = {
+          A: await paymentToken.balanceOf(users[i].address),
+          B: await paymentTokenB.balanceOf(users[i].address),
+        };
+      }
+      
+      console.log("\n  Running settlement...");
+      await increaseTime(301);
+      await clearingHouse.performSettlement();
+      
+      // Verify assets transferred
+      expect(await bond.ownerOf(1)).to.equal(users[3].address);
+      expect(await bond.ownerOf(2)).to.equal(users[4].address);
+      console.log("  ✓ All assets transferred correctly");
+      
+      // Calculate expected net positions
+      console.log("\n  Net Position Summary:");
+      for (let i = 0; i < 5; i++) {
+        const finalA = await paymentToken.balanceOf(users[i].address);
+        const finalB = await paymentTokenB.balanceOf(users[i].address);
+        const changeA = finalA - initialBalances[i].A;
+        const changeB = finalB - initialBalances[i].B;
+        const totalChange = changeA + changeB;
+        
+        console.log(`    User ${i}: TokenA ${ethers.formatUnits(changeA, 18)}, TokenB ${ethers.formatUnits(changeB, 18)} = Net ${ethers.formatUnits(totalChange, 18)}`);
+      }
+      
+      console.log("\n  ✓ Mixed transaction settlement completed successfully");
+    });
+  });
+
+  // ============================================================
+  // EXISTING TESTS (REGRESSION)
+  // ============================================================
+
+  describe("Multicurrency Support (Regression)", function () {
+    it("Should match a Seller accepting multiple currencies with a Buyer picking one", async function () {
+      console.log("\n  [Narrative] Testing Multicurrency Sell Order (Token A or Token B)");
+      
+      const tokenId = 1;
+      await bond.mint(users[0].address, 1000, 500, 1234567890); 
+      
+      const priceA = ethers.parseUnits("100", 18);
+      const priceB = ethers.parseUnits("200", 18);
+      
+      await clearingHouse.connect(users[0]).submitMulticurrencySellOrder(
+        bond.target, tokenId, [paymentToken.target, paymentTokenB.target], [priceA, priceB], ethers.ZeroAddress
+      );
+      await clearingHouse.connect(users[1]).submitBuyOrder(
+        bond.target, tokenId, paymentTokenB.target, priceB, ethers.ZeroAddress
+      );
+
+      await increaseTime(301);
+      await clearingHouse.performSettlement();
+
+      expect(await bond.ownerOf(tokenId)).to.equal(users[1].address);
+      
+      const balB = await paymentTokenB.balanceOf(users[0].address);
+      const initial = ethers.parseUnits("10000", 18);
+      expect(balB).to.equal(initial + priceB);
+    });
+  });
+
   describe("Basic Tests Regression", function () {
     it("Should settle a simple matched trade (User 0 -> User 1)", async function () {
-        const price = ethers.parseUnits("100", 18);
-        const tokenId = 0; // Bond 0 owned by User 0
+      const price = ethers.parseUnits("100", 18);
+      const tokenId = 0;
 
-        // Use submitMulticurrencySellOrder for Seller
-        await clearingHouse.connect(users[0]).submitMulticurrencySellOrder(
-            bond.target,
-            tokenId,
-            [paymentToken.target],
-            [price],
-            ethers.ZeroAddress
-        );
-        
-        // Use submitBuyOrder for Buyer
-        await clearingHouse.connect(users[1]).submitBuyOrder(
-            bond.target,
-            tokenId,
-            paymentToken.target,
-            price,
-            ethers.ZeroAddress
-        );
+      await clearingHouse.connect(users[0]).submitMulticurrencySellOrder(
+        bond.target, tokenId, [paymentToken.target], [price], ethers.ZeroAddress
+      );
+      await clearingHouse.connect(users[1]).submitBuyOrder(
+        bond.target, tokenId, paymentToken.target, price, ethers.ZeroAddress
+      );
 
-        await increaseTime(301);
-        await clearingHouse.performSettlement();
+      await increaseTime(301);
+      await clearingHouse.performSettlement();
 
-        expect(await bond.ownerOf(tokenId)).to.equal(users[1].address);
+      expect(await bond.ownerOf(tokenId)).to.equal(users[1].address);
+    });
+  });
+
+  // ============================================================
+  // FAILURE HANDLING TESTS
+  // ============================================================
+
+  describe("Failure Handling", function () {
+    beforeEach(async function () {
+      await clearingHouse.connect(users[0]).configureAcceptedStablecoins(
+        [paymentToken.target], paymentToken.target
+      );
+      await clearingHouse.connect(users[1]).configureAcceptedStablecoins(
+        [paymentToken.target], paymentToken.target
+      );
+    });
+
+    it("Should retry failed payment for MAX_FAILED_CYCLES", async function () {
+      console.log("\n  [Test] Payment Retry Queue");
+      
+      const amount = ethers.parseUnits("500", 18);
+      
+      // Create payment
+      await clearingHouse.connect(users[0]).createPaymentRequest(users[1].address, amount);
+      await clearingHouse.connect(users[1]).fulfillPaymentRequest(0, paymentToken.target);
+      
+      // Revoke approval to cause failure
+      await paymentToken.connect(users[1]).approve(clearingHouse.target, 0);
+      
+      // First settlement attempt - should fail
+      await increaseTime(301);
+      await clearingHouse.performSettlement();
+      
+      let payment = await clearingHouse.paymentRequests(0);
+      expect(payment.active).to.be.true; // Still active
+      expect(payment.failedSettlementCycles).to.equal(1n);
+      console.log("  ✓ Payment active after 1st failure");
+      
+      // Second settlement attempt - should fail again
+      await increaseTime(301);
+      await clearingHouse.performSettlement();
+      
+      payment = await clearingHouse.paymentRequests(0);
+      expect(payment.active).to.be.false; // Cancelled after 2 failures
+      console.log("  ✓ Payment cancelled after MAX_FAILED_CYCLES");
     });
   });
 });

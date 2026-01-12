@@ -8,6 +8,12 @@ export default defineConfig({
     profiles: {
       default: {
         version: "0.8.28",
+        settings: {
+          optimizer: {
+            enabled: true,
+            runs: 50,  // Lower runs to reduce contract size
+          },
+        },
       },
       production: {
         version: "0.8.28",
