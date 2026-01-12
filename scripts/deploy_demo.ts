@@ -4,7 +4,14 @@ import { network } from "hardhat";
 import { fileURLToPath } from 'url';
 
 async function main() {
-  const { ethers } = await network.connect();
+  // Parse --network argument from command line
+  const networkArg = process.argv.find(arg => arg.startsWith('--network'));
+  const networkIdx = process.argv.indexOf('--network');
+  const networkName = networkArg?.includes('=') 
+    ? networkArg.split('=')[1] 
+    : (networkIdx !== -1 ? process.argv[networkIdx + 1] : undefined);
+  
+  const { ethers } = await network.connect(networkName);
   const [deployer] = await ethers.getSigners();
   console.log("Deploying contracts with the account:", deployer.address);
 
