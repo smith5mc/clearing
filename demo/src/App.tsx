@@ -1066,59 +1066,87 @@ export default function App() {
     const signer = await provider.getSigner(userAddress);
     const chWithSigner = contractsRef.current.ClearingHouse.connect(signer);
 
-    // Randomly choose transaction type: 40% DvP, 35% Payment, 25% Swap
-    const transactionType = Math.random();
+    // Check if there are pending payments that this user can fulfill
+    const pendingPayments = paymentsRef.current.filter(p =>
+      p.status === 'pending' &&
+      (p.sender === ethers.ZeroAddress || // Open request (anyone can fulfill)
+       p.sender === userAddress.toLowerCase()) // Or payment where this user is the sender
+    );
+
+    // 20% chance to fulfill a pending payment instead of creating new transactions
+    const shouldFulfillPayment = pendingPayments.length > 0 && Math.random() < 0.2;
 
     try {
       let tx;
       let txType = 'unknown';
 
-      if (transactionType < 0.4) {
-        // DvP Order (40%)
-        const isBuy = Math.random() > 0.5;
-        const price = ethers.parseUnits((10 + Math.floor(Math.random() * 50)).toString(), 18);
-        const assetId = 1 + Math.floor(Math.random() * 3);
-        txType = isBuy ? 'BUY order' : 'SELL order';
+      if (shouldFulfillPayment) {
+        // Fulfill a pending payment (20% chance)
+        const paymentToFulfill = pendingPayments[Math.floor(Math.random() * pendingPayments.length)];
+        const paymentId = paymentToFulfill.paymentId;
 
-        if (isBuy) {
-          tx = await chWithSigner.submitBuyOrder(
-            config.addresses.Bond,
-            assetId,
-            config.addresses.TokenA,
-            price,
-            ethers.ZeroAddress
+        // Choose a token that the recipient accepts
+        const recipientConfig = await chWithSigner.getUserConfig(paymentToFulfill.recipient);
+        const acceptedTokens = recipientConfig[0]; // acceptedStablecoins array
+        const chosenToken = acceptedTokens[Math.floor(Math.random() * acceptedTokens.length)];
+
+        txType = 'payment fulfillment';
+        tx = await chWithSigner.fulfillPaymentRequest(paymentId, chosenToken);
+      } else {
+        // Create new transactions: 40% DvP, 35% Payments, 25% Swap
+        const transactionType = Math.random();
+
+        if (transactionType < 0.4) {
+          // DvP Order (40%)
+          const isBuy = Math.random() > 0.5;
+          const price = ethers.parseUnits((10 + Math.floor(Math.random() * 50)).toString(), 18);
+          const assetId = 1 + Math.floor(Math.random() * 3);
+          txType = isBuy ? 'BUY order' : 'SELL order';
+
+          if (isBuy) {
+            tx = await chWithSigner.submitBuyOrder(
+              config.addresses.Bond,
+              assetId,
+              config.addresses.TokenA,
+              price,
+              ethers.ZeroAddress
+            );
+          } else {
+            tx = await chWithSigner.submitMulticurrencySellOrder(
+              config.addresses.Bond,
+              assetId,
+              [config.addresses.TokenA],
+              [price],
+              ethers.ZeroAddress
+            );
+          }
+        } else if (transactionType < 0.75) {
+          // Payment Request (35%)
+          const amount = ethers.parseUnits((100 + Math.floor(Math.random() * 500)).toString(), 18);
+          let recipientAddress;
+          do {
+            const recipientIndex = Math.floor(Math.random() * config.users.length);
+            recipientAddress = config.users[recipientIndex];
+          } while (recipientAddress === userAddress); // Don't send to self
+
+          txType = 'payment request';
+
+          tx = await chWithSigner.createPaymentRequest(
+            recipientAddress,
+            amount
           );
         } else {
-          tx = await chWithSigner.submitMulticurrencySellOrder(
-            config.addresses.Bond,
-            assetId,
-            [config.addresses.TokenA],
-            [price],
-            ethers.ZeroAddress
+          // PvP Swap (25%)
+          const sendAmount = ethers.parseUnits((200 + Math.floor(Math.random() * 800)).toString(), 18);
+          const receiveAmount = ethers.parseUnits((180 + Math.floor(Math.random() * 720)).toString(), 18);
+          txType = 'swap order';
+
+          tx = await chWithSigner.submitSwapOrder(
+            sendAmount,
+            config.addresses.TokenA,
+            receiveAmount
           );
         }
-      } else if (transactionType < 0.75) {
-        // Payment Request (35%)
-        const amount = ethers.parseUnits((100 + Math.floor(Math.random() * 500)).toString(), 18);
-        const recipientIndex = Math.floor(Math.random() * config.users.length);
-        const recipientAddress = config.users[recipientIndex];
-        txType = 'payment request';
-
-        tx = await chWithSigner.createPaymentRequest(
-          recipientAddress,
-          amount
-        );
-      } else {
-        // PvP Swap (25%)
-        const sendAmount = ethers.parseUnits((200 + Math.floor(Math.random() * 800)).toString(), 18);
-        const receiveAmount = ethers.parseUnits((180 + Math.floor(Math.random() * 720)).toString(), 18);
-        txType = 'swap order';
-
-        tx = await chWithSigner.submitSwapOrder(
-          sendAmount,
-          config.addresses.TokenA,
-          receiveAmount
-        );
       }
 
       addLog(`TX sent: ${tx.hash.slice(0, 10)}... (${txType})`, 'info');
@@ -1604,13 +1632,24 @@ export default function App() {
 
       {/* Settlement Balances Panel - Bottom Center (Compact) */}
       {(() => {
+        // Include all transaction types that will be settled
         const matchedOrders = currentOrders.filter(o => o.matchedWith && o.status === 'pending');
-        if (matchedOrders.length === 0) return null;
+        const fulfilledPayments = currentPayments.filter(p => p.status === 'fulfilled');
+        const matchedSwaps = currentSwaps.filter(s => s.matchedOrderId && s.status === 'pending');
+
+        const totalTransactions = matchedOrders.length + fulfilledPayments.length + matchedSwaps.length;
+        if (totalTransactions === 0) return null;
 
         // Calculate gross and net balances per user
         const userBalances: Record<string, { gross: number; pays: number; receives: number; userName: string }> = {};
         const processedPairs = new Set<string>();
 
+        const userIndex = (userId: string) => {
+          const idx = config.users.findIndex(u => u.toLowerCase() === userId);
+          return idx >= 0 ? `U${idx + 1}` : userId.slice(0, 4);
+        };
+
+        // Add DvP order balances
         for (const order of matchedOrders) {
           if (!order.matchedWith) continue;
           const pairKey = [order.id, order.matchedWith].sort().join('-');
@@ -1624,11 +1663,6 @@ export default function App() {
           const sellOrder = order.type === 'SELL' ? order : matchedOrder;
           const price = parseFloat(buyOrder.price);
 
-          const userIndex = (userId: string) => {
-            const idx = config.users.findIndex(u => u.toLowerCase() === userId);
-            return idx >= 0 ? `U${idx + 1}` : userId.slice(0, 4);
-          };
-
           if (!userBalances[buyOrder.userId]) {
             userBalances[buyOrder.userId] = { gross: 0, pays: 0, receives: 0, userName: userIndex(buyOrder.userId) };
           }
@@ -1640,6 +1674,58 @@ export default function App() {
           userBalances[buyOrder.userId].gross += price;
           userBalances[sellOrder.userId].receives += price;
           userBalances[sellOrder.userId].gross += price;
+        }
+
+        // Add payment balances
+        for (const payment of fulfilledPayments) {
+          if (payment.sender === ethers.ZeroAddress) continue; // Skip open requests for now
+          const amount = parseFloat(payment.amount);
+
+          if (!userBalances[payment.sender]) {
+            userBalances[payment.sender] = { gross: 0, pays: 0, receives: 0, userName: userIndex(payment.sender) };
+          }
+          if (!userBalances[payment.recipient]) {
+            userBalances[payment.recipient] = { gross: 0, pays: 0, receives: 0, userName: userIndex(payment.recipient) };
+          }
+
+          userBalances[payment.sender].pays += amount;
+          userBalances[payment.sender].gross += amount;
+          userBalances[payment.recipient].receives += amount;
+          userBalances[payment.recipient].gross += amount;
+        }
+
+        // Add swap balances
+        for (const swap of matchedSwaps) {
+          if (!swap.matchedOrderId) continue;
+          const pairKey = [swap.id, `swap-${swap.matchedOrderId}`].sort().join('-');
+          if (processedPairs.has(pairKey)) continue;
+          processedPairs.add(pairKey);
+
+          const matchedSwap = matchedSwaps.find(s => s.orderId === swap.matchedOrderId);
+          if (!matchedSwap) continue;
+
+          // For swaps, both parties send and receive
+          const swapA = swap;
+          const swapB = matchedSwap;
+          const amountA = parseFloat(swapA.sendAmount);
+          const amountB = parseFloat(swapB.sendAmount);
+
+          if (!userBalances[swapA.maker]) {
+            userBalances[swapA.maker] = { gross: 0, pays: 0, receives: 0, userName: userIndex(swapA.maker) };
+          }
+          if (!userBalances[swapB.maker]) {
+            userBalances[swapB.maker] = { gross: 0, pays: 0, receives: 0, userName: userIndex(swapB.maker) };
+          }
+
+          // Party A pays sendAmount, receives receiveAmount
+          userBalances[swapA.maker].pays += amountA;
+          userBalances[swapA.maker].receives += parseFloat(swapA.receiveAmount);
+          userBalances[swapA.maker].gross += Math.abs(parseFloat(swapA.receiveAmount) - amountA);
+
+          // Party B pays sendAmount, receives receiveAmount
+          userBalances[swapB.maker].pays += amountB;
+          userBalances[swapB.maker].receives += parseFloat(swapB.receiveAmount);
+          userBalances[swapB.maker].gross += Math.abs(parseFloat(swapB.receiveAmount) - amountB);
         }
 
         const entries = Object.entries(userBalances);
@@ -1658,10 +1744,10 @@ export default function App() {
             boxShadow: '0 4px 16px rgba(0, 0, 0, 0.5)',
             zIndex: 999,
           }}>
-            <div style={{ 
-              fontSize: 11, 
-              color: COLORS.textMuted, 
-              textTransform: 'uppercase', 
+            <div style={{
+              fontSize: 11,
+              color: COLORS.textMuted,
+              textTransform: 'uppercase',
               letterSpacing: '0.5px',
               marginBottom: 8,
               display: 'flex',
@@ -1669,7 +1755,9 @@ export default function App() {
               alignItems: 'center',
             }}>
               <span>Settlement Obligations</span>
-              <span style={{ color: COLORS.match, fontWeight: 600 }}>{processedPairs.size} matches</span>
+              <span style={{ color: COLORS.match, fontWeight: 600 }}>
+                {totalTransactions} transaction{totalTransactions !== 1 ? 's' : ''}
+              </span>
             </div>
             <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
               {entries.map(([userId, balance]) => {
