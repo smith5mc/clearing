@@ -2,7 +2,7 @@
 
 ## Abstract
 
-This paper presents a decentralized clearing house architecture that extends classical multilateral netting theory to heterogeneous digital asset ecosystems. The system unifies settlement across three transaction primitives: Delivery-versus-Payment (DvP) for non-fungible assets, direct payment obligations, and Payment-versus-Payment (PvP) token exchanges. The principal contribution is a cross-token netting mechanism that exploits stablecoin fungibility—treating multiple ERC20 token implementations of the same currency (USD) as economically equivalent—to aggregate obligations across token types, thereby reducing the dimensionality of the settlement problem from $N \times M$ to $N$ where $N$ represents participants and $M$ represents token types. The architecture employs deferred asset locking (assets remain in seller custody until settlement cycle initiation), user-specified token acceptance constraints, and periodic atomic settlement with bounded retry semantics. The system is implemented as a hierarchical set of smart contracts on the Ethereum Virtual Machine with correctness demonstrated through comprehensive testing across multiple transaction types and token configurations.
+This paper presents a decentralized clearing house architecture that extends classical multilateral netting theory to heterogeneous digital asset ecosystems. The system unifies settlement across three transaction primitives: Delivery-versus-Payment (DvP) for non-fungible assets, direct payment obligations, and Payment-versus-Payment (PvP) token exchanges. The principal contribution is a cross-token netting mechanism that exploits stablecoin fungibility—treating multiple ERC20 token implementations of the same currency (USD) as economically equivalent—to aggregate obligations across token types. This reduces the number of settlement transfers needed by treating all USD stablecoins (USDC, USDT, DAI, etc.) as the same currency rather than separate currencies. The architecture employs deferred asset locking (assets remain in seller custody until settlement cycle initiation), user-specified token acceptance constraints, and periodic atomic settlement with bounded retry semantics. The system is implemented as a hierarchical set of smart contracts on the Ethereum Virtual Machine with correctness demonstrated through comprehensive testing across multiple transaction types and token configurations.
 
 **Keywords:** Blockchain, Clearing House, Multilateral Netting, Stablecoins, Atomic Settlement, DeFi, Smart Contracts
 
@@ -10,9 +10,9 @@ This paper presents a decentralized clearing house architecture that extends cla
 
 ## 1. Introduction
 
-Clearing houses represent a foundational component of modern financial infrastructure, serving dual purposes: counterparty risk mitigation through novation, and capital efficiency enhancement through multilateral netting. Traditional clearing arrangements operate under an implicit assumption of currency homogeneity, all participants accept a common settlement medium (typically central bank reserves or equivalent instruments). This homogeneity enables straightforward netting: obligations denominated in the same currency can be offset bilaterally or multilaterally, reducing both the number and volume of settlement transfers.
+Clearing houses represent a foundational component of modern financial infrastructure, serving dual purposes: counterparty risk mitigation through novation, and capital efficiency enhancement through multilateral netting. Traditional clearing arrangements operate under an implicit assumption of currency homogeneity—all participants accept a common settlement medium (typically central bank reserves or equivalent instruments). This homogeneity enables straightforward netting: obligations denominated in the same currency can be offset bilaterally or multilaterally, reducing both the number and volume of settlement transfers.
 
-Blockchain-based settlement systems introduce a novel complication: the proliferation of functionally equivalent yet technically distinct settlement instruments. The contemporary landscape includes multiple USD-pegged stablecoins, each implemented as a separate ERC20 token contract, with combined market capitalization exceeding \$250 billion and at least eight individual tokens surpassing \$1 billion valuation. While these instruments nominally represent claims on the same unit of account (USD), their technical implimentations (different contract addresses, issuers, and operational characteristics) precludes direct fungibility at the protocol level.
+Blockchain-based settlement systems introduce a novel complication: the proliferation of functionally equivalent yet technically distinct settlement instruments. The contemporary landscape includes multiple USD-pegged stablecoins, each implemented as a separate ERC20 token contract, with combined market capitalization exceeding $250 billion and at least eight individual tokens surpassing $1 billion valuation. While these instruments nominally represent claims on the same unit of account (USD), their technical implementations (different contract addresses, issuers, and operational characteristics) preclude direct fungibility at the protocol level.
 
 This heterogeneity presents a challenge for clearing house design. Traditional approaches may treat each stablecoin as a distinct currency, requiring separate netting pools and potentially fragmenting liquidity across the number of distinct tokens. Such fragmentation could undermine the capital efficiency gains that motivate clearing arrangements in the first instance.
 
@@ -20,28 +20,28 @@ This heterogeneity presents a challenge for clearing house design. Traditional a
 
 This work addresses the following research question: *How can multilateral netting be extended to environments where settlement media are technically heterogeneous (multiple token implementations) but economically equivalent (same underlying unit of account), subject to participant-level acceptance constraints?*
 
-Formally, consider a clearing system with $N$ participants and $M$ stablecoin token types representing the same currency (USD), where each participant $i$ maintains an acceptance set $A_i \subseteq \{1, ..., M\}$ of tokens they are willing to receive. Traditional per-token netting would compute $N \times M$ net positions—treating each token type as requiring separate settlement. The objective is to reduce this to $N$ aggregate positions by exploiting the economic equivalence of tokens sharing a common peg, while respecting acceptance constraints and maintaining atomic settlement guarantees.
+Consider a clearing system with multiple participants and multiple stablecoin token types representing the same currency (USD), where each participant maintains a list of tokens they're willing to receive. Traditional per-token netting would compute separate net positions for each participant-token combination—treating each token type as requiring separate settlement. The objective is to reduce this by exploiting the economic equivalence of tokens sharing a common peg, while respecting acceptance constraints and maintaining atomic settlement guarantees.
 
 The design must satisfy the following requirements:
 
 1. **Preferences**: Participants specify which tokens they accept, reflecting varying risk tolerance for different stablecoin issuers.
 2. **Capital Efficiency**: Settlement transfers should be minimized by using economic equivalence (assuming the user has selected they would accept these tokens) despite technical heterogeneity.
-3. **Operational Flexibility**: Participants should be able to settle using their available token balances across their acceptance set, potentially allowing them to settle with participants who would not accept their token balances. 
+3. **Operational Flexibility**: Participants should be able to settle using their available token balances across their acceptance set, potentially allowing them to settle with participants who would not accept their token balances.
 
 
 ### 1.2 Motivation
 
 The proliferation of stablecoins creates capital fragmentation both within and across decentralized finance protocols. Participants must maintain balances across multiple tokens, each representing the same unit of account but requiring separate approvals, tracking, and management. Furthermore, contemporary DeFi protocols operate in isolation, with no mechanism for netting obligations across different transaction types (e.g., asset purchases, loan repayments, and currency exchanges).
 
-Traditional clearing house designs, when applied naively to multi-stablecoin environments, would preserve this fragmentation by netting each currency independently. A participant owing 1000 USDC and receiving 800 USDT would face two settlement transfers despite both denominating obligations in USD. Scaled across $N$ participants and $M$ tokens, this approach requires up to $N \times M$ transfers per settlement cycle.
+Traditional clearing house designs, when applied naively to multi-stablecoin environments, would preserve this fragmentation by netting each currency independently. A participant owing 1000 USDC and receiving 800 USDT would face two settlement transfers despite both denominating obligations in USD. Scaled across many participants and tokens, this approach requires separate transfers for each participant-token combination.
 
-This work posits that stablecoin economic equivalence, specifically, the maintained peg to a common unit of account (USD), enables a dimensional reduction in the netting problem. By aggregating obligations across technically distinct token implementations of the same currency, settlement complexity can be reduced while respecting individual risk preferences regarding specific token acceptance.
+This work posits that stablecoin economic equivalence—specifically, the maintained peg to a common unit of account (USD)—enables a reduction in the netting problem. By aggregating obligations across technically distinct token implementations of the same currency, settlement complexity can be reduced while respecting individual risk preferences regarding specific token acceptance.
 
 ### 1.3 Contributions
 
 This paper makes the following technical contributions:
 
-1. **Cross-Token Netting Algorithm**: A netting mechanism that aggregates obligations across multiple token implementations of the same currency (USD-pegged stablecoins), reducing settlement dimensionality from $N \times M$ to $N$ while preserving participant sovereignty over token acceptance. This exploits the economic equivalence of tokens sharing a common peg rather than treating them as distinct currencies.
+1. **Cross-Token Netting Algorithm**: A netting mechanism that aggregates obligations across multiple token implementations of the same currency (USD-pegged stablecoins), reducing the number of settlement transfers while preserving participant sovereignty over token acceptance. This exploits the economic equivalence of tokens sharing a common peg rather than treating them as distinct currencies.
 
 2. **Unified Multi-Primitive Settlement**: Demonstration of atomic settlement across heterogeneous transaction types (DvP, payments, and PvP swaps) within a single netting cycle, enabling cross-transaction obligation offsets.
 
@@ -79,11 +79,11 @@ None of these systems implement unified netting across multiple transaction type
 
 ### 2.3 Netting Theory and Cross-Token Extension
 
-Multilateral netting reduces the number of payment transfers by offsetting obligations between multiple parties. Formally, let $O_{ij}^k$ represent an obligation from participant $i$ to participant $j$ in currency $k$. Without netting, settlement requires $\sum_{i,j,k} \mathbb{1}[O_{ij}^k > 0]$ transfers. Bilateral netting reduces this by computing net positions $N_i^k = \sum_j O_{ij}^k - \sum_j O_{ji}^k$ for each participant and currency, requiring at most $N \times M$ transfers where $N$ is the number of participants and $M$ is the number of currencies.
+Multilateral netting reduces the number of payment transfers by offsetting obligations between multiple parties. Without netting, settlement requires one transfer for every non-zero obligation between participants. Bilateral netting reduces this by computing net positions for each participant and currency, requiring at most one transfer per participant-currency pair.
 
-**Traditional Cross-Currency Netting** extends this to multiple currencies with known exchange rates. When currencies $k$ and $k'$ maintain a fixed exchange rate (e.g., $e_{k,k'} = 1.2$ for EUR/USD), obligations can be aggregated after conversion. However, this still treats each currency as fundamentally distinct.
+**Traditional Cross-Currency Netting** extends this to multiple currencies with known exchange rates. When currencies maintain a fixed exchange rate (e.g., 1.2 for EUR/USD), obligations can be aggregated after conversion. However, this still treats each currency as fundamentally distinct.
 
-**Cross-Token Netting (This Work)**: The stablecoin context presents a unique situation—multiple token types represent the *same* currency. USDC, USDT, DAI, and other USD-pegged stablecoins are not different currencies requiring exchange rate conversion; they are different *implementations* of USD claims. When tokens $t$ and $t'$ both represent 1 USD (i.e., $e_{t,t'} = 1$), obligations can be aggregated: $N_i = \sum_k N_i^k$. This reduces settlement complexity to at most $N$ transfers—a reduction by a factor of $M$.
+**Cross-Token Netting (This Work)**: The stablecoin context presents a unique situation—multiple token types represent the *same* currency. USDC, USDT, DAI, and other USD-pegged stablecoins are not different currencies requiring exchange rate conversion; they are different *implementations* of USD claims. When tokens both represent 1 USD (i.e., they maintain their peg at 1:1), obligations can be aggregated without exchange rate conversion. This reduces settlement complexity significantly.
 
 The distinction is critical: traditional cross-currency netting (e.g., netting USD against EUR) requires exchange rate management and handles genuinely different currencies. This system performs cross-token netting within a single currency—different token implementations (USDC, USDT, DAI) of the same unit of account (USD). The risk is not exchange rate fluctuation between distinct currencies, but rather depeg risk where a specific token implementation temporarily loses its peg to the underlying unit of account.
 
@@ -118,9 +118,9 @@ The system processes three transaction types:
 
 DvP transactions exchange non-fungible assets (ERC721 tokens representing securities, real estate, or other unique instruments) for stablecoin payments (ERC20 tokens). The order structure supports:
 
-- **Buy Orders**: Participant specifies $(a, t_{\text{ID}}, t_{\text{pay}}, p, c)$ where $a$ is the asset contract address, $t_{\text{ID}}$ is the token identifier, $t_{\text{pay}}$ is the payment token, $p$ is the offered price, and $c$ is an optional counterparty constraint (address(0) indicates willingness to trade with any counterparty).
+- **Buy Orders**: Participant specifies the asset contract address, token ID, payment token, offered price, and optional counterparty constraint (address(0) indicates willingness to trade with any counterparty).
 
-- **Sell Orders**: Participant specifies $(a, t_{\text{ID}}, \{(t_i, p_i)\}_{i=1}^{k}, c)$ where the seller accepts any of $k$ payment tokens with corresponding prices, enabling multi-token acceptance.
+- **Sell Orders**: Participant specifies the asset contract address, token ID, and a list of acceptable payment tokens with corresponding prices, enabling multi-token acceptance.
 
 **Deferred Locking Mechanism**: Unlike traditional models requiring immediate asset transfer upon order submission, this system defers asset locking until the settlement cycle matching phase. Sellers maintain custody of their assets (requiring only `setApprovalForAll` authorization) from order submission until a settlement cycle begins. When settlement commences, if a valid match exists, the system locks the asset by transferring it to the contract via `safeTransferFrom`. The asset then transfers to the final buyer only if cash settlement succeeds atomically. If settlement fails after bounded retries (MAX_FAILED_CYCLES = 2), the locked asset returns to the original seller. This approach minimizes custody relinquishment duration compared to traditional pre-funding models while maintaining atomic settlement guarantees.
 
@@ -128,9 +128,9 @@ DvP transactions exchange non-fungible assets (ERC721 tokens representing securi
 
 Payment requests represent unilateral transfer obligations between participants. The two-phase mechanism operates as follows:
 
-1. **Request Phase**: Recipient $r$ creates a payment request $(s, v)$ where $s$ is the designated sender (or address(0) for open requests fulfillable by any participant) and $v$ is the payment amount in base units.
+1. **Request Phase**: Recipient creates a payment request specifying the designated sender (or address(0) for open requests fulfillable by any participant) and the payment amount in base units.
 
-2. **Fulfillment Phase**: The sender (either designated $s$ or, for open requests, any participant) fulfills the request by committing to pay $v$ units in token $t \in S_r$ where $S_r$ is the recipient's acceptance set.
+2. **Fulfillment Phase**: The sender (either designated or, for open requests, any participant) fulfills the request by committing to pay the specified amount in a token from the recipient's acceptance set.
 
 This structure enables flexible payment arrangements: directed payments for specific obligations, and open payments analogous to invoice settlement where the payer is not predetermined. Importantly, these payment obligations integrate into the unified netting calculation, enabling direct payments to offset DvP or swap obligations.
 
@@ -138,9 +138,9 @@ This structure enables flexible payment arrangements: directed payments for spec
 
 PvP swap orders facilitate stablecoin exchanges through an order book mechanism with automatic matching:
 
-- **Order Submission**: Participant $m$ submits order $(v_{\text{send}}, t_{\text{send}}, v_{\text{recv}})$ indicating willingness to send $v_{\text{send}}$ units of token $t_{\text{send}}$ in exchange for receiving $v_{\text{recv}}$ units of any token in their acceptance set $S_m$.
+- **Order Submission**: Participant submits an order indicating willingness to send a specified amount of one token in exchange for receiving a specified amount of any token in their acceptance set.
 
-- **Automatic Matching**: Upon submission, the system searches for compatible counter-orders. Orders $o_1 = (v_1, t_1, r_1)$ and $o_2 = (v_2, t_2, r_2)$ match if: (i) $v_1 \geq r_2$ and $v_2 \geq r_1$ (amount compatibility), and (ii) $t_1 \in S_{\text{maker}_2}$ and $t_2 \in S_{\text{maker}_1}$ (mutual token acceptance).
+- **Automatic Matching**: Upon submission, the system searches for compatible counter-orders. Orders match if: (i) both orders satisfy each other's amount requirements (amount compatibility), and (ii) each participant accepts the token the other is offering (mutual token acceptance).
 
 - **Settlement Integration**: Matched swaps settle atomically alongside DvP and payment transactions within the unified netting cycle.
 
@@ -148,21 +148,21 @@ This mechanism enables participants to rebalance token holdings without external
 
 ### 3.3 Participant Configuration Model
 
-Each participant $u$ must configure a preference structure $(S_u, p_u)$ prior to engaging in payment or swap transactions (DvP transactions do not require this configuration as payment tokens are explicitly specified per order):
+Each participant must configure a preference structure prior to engaging in payment or swap transactions (DvP transactions do not require this configuration as payment tokens are explicitly specified per order):
 
-- **Acceptance Set** $S_u \subseteq T$: The set of stablecoin tokens participant $u$ is willing to receive. This represents the participant's trust model—tokens outside $S_u$ are categorically rejected due to perceived counterparty risk, regulatory concerns, or operational constraints.
+- **Acceptance Set**: The set of stablecoin tokens the participant is willing to receive. This represents the participant's trust model—tokens outside this set are categorically rejected due to perceived counterparty risk, regulatory concerns, or operational constraints.
 
-- **Preferred Token** $p_u \in S_u$: The token participant $u$ prefers for distribution when their net position is positive ($A_u > 0$). The system attempts to satisfy this preference subject to availability constraints.
+- **Preferred Token**: The token the participant prefers for distribution when their net position is positive (they're owed money). The system attempts to satisfy this preference subject to availability constraints.
 
 **Design Rationale**: This configuration mechanism serves three purposes:
 
 1. **Decentralized Risk Management**: Rather than imposing protocol-level trust assumptions about which stablecoins are "acceptable," the system delegates this decision to individual participants. This heterogeneity of trust models enhances systemic resilience—no single stablecoin failure affects all participants.
 
-2. **Settlement Feasibility**: The acceptance sets inform the collection algorithm (Algorithm 2), enabling the system to determine which tokens it may collect from or distribute to each participant.
+2. **Settlement Feasibility**: The acceptance sets inform the collection algorithm, enabling the system to determine which tokens it may collect from or distribute to each participant.
 
 3. **Preference Satisfaction**: The preferred token enables operational efficiency for participants who, while accepting multiple tokens for settlement purposes, prefer to hold balances in specific instruments for downstream purposes (e.g., liquidity provision, collateral posting, yield farming).
 
-**Constraint**: The acceptance set must be non-empty ($S_u \neq \emptyset$) and the preferred token must be in the acceptance set ($p_u \in S_u$). These constraints are enforced by smart contract validation.
+**Constraint**: The acceptance set must be non-empty and the preferred token must be in the acceptance set. These constraints are enforced by smart contract validation.
 
 ---
 
@@ -173,24 +173,22 @@ Each participant $u$ must configure a preference structure $(S_u, p_u)$ prior to
 Settlement executes periodically (configurable `SETTLEMENT_INTERVAL` = 5 minutes in current implementation) and processes all pending transactions atomically. The process comprises five sequential phases:
 
 **Phase 1: DvP Obligation Calculation**  
-For each unique asset $(a, t_{\text{ID}})$, the system identifies matching buy-sell chains and computes per-participant per-token obligations. This involves:
+For each unique asset, the system identifies matching buy-sell chains and computes per-participant per-token obligations. This involves:
 1. Identifying or locking an initial seller
 2. Traversing the matching chain (Sell → Buy → Sell → ...)
 3. Accumulating payment obligations for each participant in the chain
 
 **Phase 2: Payment Obligation Calculation**  
-For each fulfilled payment request $p = (r, s, v, t_f)$, update net balances:
-- $B_{s, t_f} := B_{s, t_f} - v$ (sender owes)
-- $B_{r, t_f} := B_{r, t_f} + v$ (recipient receives)
+For each fulfilled payment request, update net balances: the sender owes the specified amount in the token they chose, and the recipient is owed that amount.
 
 **Phase 3: Swap Obligation Calculation**  
-For each matched swap pair $(o_1, o_2)$, update both participants' net balances according to the exchange terms, ensuring each pair is processed exactly once.
+For each matched swap pair, update both participants' net balances according to the exchange terms, ensuring each pair is processed exactly once.
 
 **Phase 4: Cross-Token Aggregation**  
-Compute aggregate positions $A_u = \sum_{t \in T} B_{u,t}$ for all involved participants, reducing the settlement problem from $N \times M$ dimensions to $N$ dimensions by treating all USD-pegged tokens as equivalent.
+Compute aggregate positions for all involved participants by summing their obligations across all USD-pegged tokens. This reduces the settlement problem from tracking each participant-token combination separately to just tracking one number per participant, by treating all USD-pegged tokens as equivalent.
 
 **Phase 5: Atomic Settlement Execution**  
-Execute collection from participants with $A_u < 0$ (Algorithm 2) and distribution to participants with $A_u > 0$ (Algorithm 3). If collection succeeds for all obligated participants, proceed to distribution and finalization. If any collection fails, abort entire batch, refund collected amounts, and increment failure counters.
+Execute collection from participants who owe money and distribution to participants who are owed money. If collection succeeds for all obligated participants, proceed to distribution and finalization. If any collection fails, abort entire batch, refund collected amounts, and increment failure counters.
 
 **Atomicity Guarantee**: The settlement transaction either completes successfully (all obligations settled, all assets transferred) or reverts entirely (no state changes persist). This all-or-nothing semantic ensures that partial settlement cannot occur, preserving consistency.
 
@@ -198,26 +196,26 @@ Execute collection from participants with $A_u < 0$ (Algorithm 2) and distributi
 
 #### 4.2.1 DvP Chain Matching and Obligation Accumulation
 
-For each unique asset $(a, t_{\text{ID}})$ with active orders, the system executes a chain traversal algorithm:
+For each unique asset with active orders, the system executes a chain traversal algorithm:
 
 ```
 Algorithm: DvP Chain Traversal
-Input: Asset (a, t_ID), Current owner o
-Output: Updated net balances B[u][t]
+Input: Asset (contract address, token ID), Current owner
+Output: Updated net balances for each user and token
 
 1. If no locked owner exists:
-   a. Find matchable seller s (has asset, has matching buyer)
-   b. Transfer asset from s to contract (lock)
-   c. Set o ← s
+   a. Find matchable seller (has asset, has matching buyer)
+   b. Transfer asset from seller to contract (lock)
+   c. Set current owner to this seller
 
-2. Initialize chain traversal from owner o
+2. Initialize chain traversal from owner
 3. While chain continues and iterations < 50:
-   a. Find sell order: owner o sells (a, t_ID)
-   b. Find matching buy order: buyer b purchases at price p in token t
+   a. Find sell order: owner sells this asset
+   b. Find matching buy order: buyer purchases at acceptable price in acceptable token
    c. Update obligations:
-      - B[b][t] ← B[b][t] - p  (buyer pays)
-      - B[o][t] ← B[o][t] + p  (seller receives)
-   d. Transfer logical ownership: o ← b
+      - Buyer owes the price in the specified token
+      - Seller receives the price in the specified token
+   d. Transfer logical ownership to buyer
    e. Continue chain from new owner
 
 4. Final owner receives asset transfer in Phase 5
@@ -225,64 +223,37 @@ Output: Updated net balances B[u][t]
 
 **Chain Termination**: Chains terminate when no matching counterparty exists for the current owner or the iteration bound (50) is reached. The iteration bound prevents infinite loops in adversarial scenarios but may limit chain length in high-liquidity markets.
 
-**Matching Criteria**: A buy order $b = (a, t_{\text{ID}}, t_{\text{pay}}, p_b, c_b)$ matches a sell order $s$ if:
-1. Price compatibility: $p_b \geq p_s(t_{\text{pay}})$ where $p_s(t_{\text{pay}})$ is the seller's ask price for token $t_{\text{pay}}$
-2. Counterparty compatibility: $(c_b = 0 \lor c_b = \text{maker}_s) \land (c_s = 0 \lor c_s = \text{maker}_b)$
+**Matching Criteria**: A buy order matches a sell order if:
+1. Price compatibility: the buyer's offered price is at least the seller's ask price for that token
+2. Counterparty compatibility: either party hasn't specified a counterparty, or they've specified each other
 
 #### 4.2.2 Direct Payment Obligation Accumulation
 
-For each fulfilled payment request $p = (r, s, v, t_f)$ where $r$ is recipient, $s$ is sender, $v$ is amount, and $t_f$ is the token selected for fulfillment:
-
-$$
-B[s][t_f] := B[s][t_f] - v
-$$
-
-$$
-B[r][t_f] := B[r][t_f] + v
-$$
+For each fulfilled payment request where a recipient is owed money from a sender in a specific token:
+- Decrease the sender's balance by the payment amount for that token
+- Increase the recipient's balance by the payment amount for that token
 
 This creates offsetting obligations that participate in the netting calculation.
 
 #### 4.2.3 PvP Swap Obligation Accumulation
 
-For each matched swap pair $(o_1, o_2)$ where $o_i = (m_i, v_i^{\text{send}}, t_i^{\text{send}}, v_i^{\text{recv}})$:
+For each matched swap pair, update balances for both participants:
+- First participant: decrease balance in the token they're sending, increase balance in the token they're receiving
+- Second participant: decrease balance in the token they're sending, increase balance in the token they're receiving
 
-$$
-B[m_1][t_1^{\text{send}}] := B[m_1][t_1^{\text{send}}] - v_1^{\text{send}}
-$$
-
-$$
-B[m_1][t_2^{\text{send}}] := B[m_1][t_2^{\text{send}}] + v_2^{\text{send}}
-$$
-
-$$
-B[m_2][t_2^{\text{send}}] := B[m_2][t_2^{\text{send}}] - v_2^{\text{send}}
-$$
-
-$$
-B[m_2][t_1^{\text{send}}] := B[m_2][t_1^{\text{send}}] + v_1^{\text{send}}
-$$
-
-To avoid double-processing, each pair is processed exactly once by imposing an ordering constraint (process only if $o_1.\text{id} < o_2.\text{id}$).
+To avoid double-processing, each pair is processed exactly once by imposing an ordering constraint (process only if first order ID is less than second order ID).
 
 ### 4.3 Cross-Token Netting Algorithm
 
-The core innovation is the aggregation of net positions across multiple stablecoin token implementations of the same currency. The formalization is as follows:
+The core innovation is the aggregation of net positions across multiple stablecoin token implementations of the same currency. Here's how it works:
 
-**Algorithm 1: Cross-Token Net Position Calculation**
+**Algorithm: Cross-Token Net Position Calculation**
 
-Let:
-- $U = \{u_1, ..., u_n\}$ be the set of participants involved in the current settlement cycle
-- $T = \{t_1, ..., t_m\}$ be the set of stablecoin tokens involved
-- $B_{u,t} \in \mathbb{Z}$ be the per-token net balance for participant $u$ in token $t$ (negative indicates payment obligation, positive indicates receivable)
+For all participants involved in the current settlement cycle and all stablecoin tokens involved:
+- Calculate each participant's per-token net balance (negative indicates they owe money, positive indicates they're owed money)
+- Sum all per-token balances for each participant to get their aggregate position
 
-The aggregate net position for participant $u$ is computed as:
-
-$$
-A_u = \sum_{t \in T} B_{u,t}
-$$
-
-This aggregation is valid under the assumption that $\forall t, t' \in T: e_{t,t'} = 1$ where $e_{t,t'}$ is the exchange rate between tokens $t$ and $t'$.
+This aggregation is valid under the assumption that all USD-pegged tokens maintain their 1:1 peg to the dollar.
 
 **Implementation**: The algorithm is implemented in two phases:
 
@@ -301,15 +272,13 @@ function _aggregateNetPositions() internal {
 
 **Illustrative Example**:
 Consider participant Alice with the following per-token obligations from multiple transactions:
-- $B_{\text{Alice},\text{USDC}} = -1000$ (asset purchase obligation)
-- $B_{\text{Alice},\text{USDT}} = +800$ (incoming payment receivable)
-- $B_{\text{Alice},\text{DAI}} = +300$ (asset sale receivable)
+- USDC: -1000 (asset purchase obligation)
+- USDT: +800 (incoming payment receivable)
+- DAI: +300 (asset sale receivable)
 
 Traditional per-token netting would require three settlement operations. Cross-token aggregation yields:
 
-$$
-A_{\text{Alice}} = -1000 + 800 + 300 = +100
-$$
+Alice's aggregate position = -1000 + 800 + 300 = +100
 
 Settlement: Alice receives a single transfer of 100 units in her preferred stablecoin, reducing three operations to one.
 
@@ -319,16 +288,16 @@ Settlement proceeds atomically in three phases, with failure in any phase trigge
 
 #### Phase 1: Obligation Collection
 
-For each participant $u$ with $A_u < 0$, the system must collect $|A_u|$ units. The collection algorithm attempts to gather this amount from any token in the participant's acceptance set $S_u$:
+For each participant with a negative aggregate position (they owe money), the system must collect that amount. The collection algorithm attempts to gather this amount from any token in the participant's acceptance set:
 
-**Algorithm 2: Flexible Collection**
+**Algorithm: Flexible Collection**
 ```
-function collectFromUser(u, amount):
+function collectFromUser(user, amount):
     remaining ← amount
-    for each token t in S_u:
-        available ← min(balance(u, t), allowance(u, t))
-        toCollect ← min(available, remaining)
-        if transfer(u → contract, t, toCollect) succeeds:
+    for each token in user's acceptance set:
+        available ← minimum of user's balance and their allowance to the contract
+        toCollect ← minimum of available and remaining
+        if transfer succeeds:
             remaining ← remaining - toCollect
         if remaining = 0: return SUCCESS
     return FAILURE
@@ -338,19 +307,19 @@ This flexible collection mechanism increases settlement success probability by n
 
 #### Phase 2: Distribution
 
-For each participant $u$ with $A_u > 0$, the system distributes $A_u$ units, preferentially in their specified preferred token $p_u$:
+For each participant with a positive aggregate position (they're owed money), the system distributes that amount, preferentially in their specified preferred token:
 
-**Algorithm 3: Preference-Aware Distribution**
+**Algorithm: Preference-Aware Distribution**
 ```
-function distributeToUser(u, amount):
-    if balance(contract, p_u) ≥ amount:
-        transfer(contract → u, p_u, amount)
+function distributeToUser(user, amount):
+    if contract has enough of user's preferred token:
+        transfer that amount to user
     else:
         // Distribute from available tokens
         remaining ← amount
-        for each token t where balance(contract, t) > 0:
-            toSend ← min(balance(contract, t), remaining)
-            transfer(contract → u, t, toSend)
+        for each token the contract has:
+            toSend ← minimum of contract's balance and remaining
+            transfer to user
             remaining ← remaining - toSend
 ```
 
@@ -365,15 +334,15 @@ Upon successful cash settlement:
 
 When settlement execution fails (typically due to insufficient participant balances or revoked approvals), the system implements bounded retry semantics:
 
-**Failure Detection**: Settlement fails if any collection operation (Phase 1 of Algorithm 2) returns FAILURE. This triggers atomic rollback—all collected funds are refunded, and no state transitions persist.
+**Failure Detection**: Settlement fails if any collection operation returns FAILURE. This triggers atomic rollback—all collected funds are refunded, and no state transitions persist.
 
-**Retry Mechanism**: Each transaction maintains a failure counter $f$. Upon settlement failure, $f$ increments for all active transactions. The system retries settlement in subsequent cycles.
+**Retry Mechanism**: Each transaction maintains a failure counter. Upon settlement failure, the counter increments for all active transactions. The system retries settlement in subsequent cycles.
 
-**Termination Condition**: When $f \geq \texttt{MAX\_FAILED\_CYCLES}$ (currently 2), transaction-type-specific cancellation logic executes:
+**Termination Condition**: When the failure counter reaches MAX_FAILED_CYCLES (currently 2), transaction-type-specific cancellation logic executes:
 
 - **DvP Orders**: Locked assets transfer back to seller, order deactivates
 - **Payment Requests**: Request cancels, emitting cancellation event
-- **Swap Orders**: Orders unmatch (both orders reset to unmatched state with $f = 0$), allowing potential matching with different counterparties
+- **Swap Orders**: Orders unmatch (both orders reset to unmatched state with failure counter at 0), allowing potential matching with different counterparties
 
 **Design Rationale**: Bounded retry prevents indefinite resource lock-up when participants become insolvent or uncooperative. The retry count of 2 balances two concerns: (i) allowing temporary liquidity shortfalls to resolve (participant may receive funds in subsequent cycle enabling settlement), and (ii) preventing excessive delay for functioning participants waiting on non-performing counterparties.
 
@@ -383,14 +352,14 @@ When settlement execution fails (typically due to insufficient participant balan
 
 #### 4.6.1 DvP Order Matching
 
-For each unique asset $(a, t_{\text{ID}})$, the matching algorithm proceeds as follows:
+For each unique asset, the matching algorithm proceeds as follows:
 
 **Step 1: Seller Identification**  
-Identify the first valid non-locked seller $s$ with an active sell order for $(a, t_{\text{ID}})$.
+Identify the first valid non-locked seller with an active sell order for that asset.
 
 **Step 2: Counterparty Validation**  
-Search for a matching buy order $b$. Orders match if:
-- **Price Condition**: $p_b \geq p_s(t_b)$ where $p_b$ is buyer's offer price, $t_b$ is buyer's payment token, and $p_s(t_b)$ is seller's ask price for token $t_b$
+Search for a matching buy order. Orders match if:
+- **Price Condition**: buyer's offer price is at least the seller's ask price for the buyer's payment token
 - **Counterparty Condition**: Mutual counterparty compatibility (either unrestricted or explicitly specified)
 
 **Step 3: Asset Locking**  
@@ -399,34 +368,33 @@ If a match exists, attempt atomic transfer of asset from seller to contract usin
 **Step 4: Chain Traversal**  
 From the locked seller, traverse the matching chain as described in Section 4.2.1.
 
-**Order Selection Policy**: The algorithm employs first-available matching: the first valid seller and first valid buyer satisfying matching criteria are selected. This deterministic policy is intentionally simple—it ensures predictable execution, bounded computational cost, and straightforward implementation verification. Alternative policies (e.g., price-time priority, pro-rata allocation, or volume-weighted matching) could improve market quality metrics such as price discovery or fairness, but would increase computational complexity from $O(K \cdot |O|^2)$ to potentially $O(K \cdot |O|^2 \log |O|)$ or worse, and introduce additional attack surfaces for strategic manipulation. The simplicity-performance trade-off favors the current approach for this initial design.
+**Order Selection Policy**: The algorithm employs first-available matching: the first valid seller and first valid buyer satisfying matching criteria are selected. This deterministic policy is intentionally simple—it ensures predictable execution, bounded computational cost, and straightforward implementation verification. Alternative policies (e.g., price-time priority, pro-rata allocation, or volume-weighted matching) could improve market quality metrics such as price discovery or fairness, but would increase computational complexity and introduce additional attack surfaces for strategic manipulation.
 
 #### 4.6.2 PvP Swap Auto-Matching
 
-Upon submission of a new swap order $o_{\text{new}} = (m, v_s, t_s, v_r)$, the system executes:
+Upon submission of a new swap order, the system executes:
 
 ```
 Algorithm: Swap Order Matching
-Input: New order o_new
+Input: New order
 Output: Matched order ID or 0 (unmatched)
 
-For each existing unmatched order o_exist:
-    If o_exist.maker = o_new.maker: continue  // No self-matching
+For each existing unmatched order:
+    If maker is the same: continue  // No self-matching
     
     // Check amount compatibility (both directions)
-    If NOT (o_exist.v_send >= o_new.v_recv AND 
-            o_new.v_send >= o_exist.v_recv):
+    If NOT (existing order's send amount >= new order's receive amount AND 
+            new order's send amount >= existing order's receive amount):
         continue
     
     // Check mutual token acceptance
-    If NOT (o_new.t_send ∈ S[o_exist.maker] AND 
-            o_exist.t_send ∈ S[o_new.maker]):
+    If NOT (new order's send token is in existing maker's acceptance set AND 
+            existing order's send token is in new maker's acceptance set):
         continue
     
     // Match found
-    Link o_new.matchedOrderId ← o_exist.id
-    Link o_exist.matchedOrderId ← o_new.id
-    Return o_exist.id
+    Link the two orders together
+    Return existing order ID
 
 Return 0  // No match found
 ```
@@ -445,9 +413,9 @@ Return 0  // No match found
 
 The principal innovation is the extension of multilateral netting to technically heterogeneous but economically equivalent settlement instruments—multiple token implementations of the same currency. Traditional clearing systems maintain separate netting pools per currency, computing independent net positions for each. This approach, when naively applied to stablecoins, treats USDC, USDT, and DAI as distinct "currencies" requiring separate settlement, despite all representing USD claims.
 
-This system aggregates obligations across all stablecoin token types sharing a common peg (USD), reducing the settlement problem from $N \times M$ dimensions (treating each token as separate) to $N$ dimensions (recognizing all as the same currency). The theoretical benefit is a reduction in the number of settlement transfers by a factor approaching $M$ in the limit, though actual reduction depends on the distribution of per-participant token obligations and acceptance constraints.
+This system aggregates obligations across all stablecoin token types sharing a common peg (USD), reducing the settlement problem significantly. Instead of tracking and settling each participant-token combination separately, we track just one aggregate number per participant. The theoretical benefit is a substantial reduction in the number of settlement transfers, though actual reduction depends on the distribution of per-participant token obligations and acceptance constraints.
 
-**Trade-offs**: This aggregation assumes stable pegs ($e_{t,t'} = 1, \forall t,t'$) where $e_{t,t'}$ represents the exchange rate between token implementations, not between distinct currencies. Depeg events—where a specific token implementation (e.g., USDT) temporarily deviates from the $1 USD peg—introduce what appears as exchange rate risk but is more accurately termed "implementation risk" or "issuer risk." This is addressed through decentralized risk management: participants specify acceptable token implementations, effectively implementing individual trust models for stablecoin issuers.
+**Trade-offs**: This aggregation assumes stable pegs (all tokens maintain 1:1 with USD). Depeg events—where a specific token implementation (e.g., USDT) temporarily deviates from the $1 USD peg—introduce implementation risk or issuer risk. This is addressed through decentralized risk management: participants specify acceptable token implementations, effectively implementing individual trust models for stablecoin issuers.
 
 ### 5.2 Deferred Asset Locking
 
@@ -473,8 +441,8 @@ This unification allows obligations from different transaction types to offset. 
 ### 5.4 Preference-Aware Settlement
 
 Participants specify two preference vectors:
-- **Acceptance Set** $S_u \subseteq T$: Tokens participant $u$ will receive
-- **Preferred Token** $p_u \in S_u$: Token participant $u$ prefers for distributions
+- **Acceptance Set**: Tokens the participant will receive
+- **Preferred Token**: Token the participant prefers for distributions
 
 This dual-constraint system balances efficiency with sovereignty: aggregation maximizes netting efficiency, while acceptance constraints preserve individual risk management. The settlement algorithm respects these constraints while attempting to satisfy preferences (with fallback mechanisms when preferred tokens are unavailable).
 
@@ -546,35 +514,35 @@ The system maintains both persistent and ephemeral state:
 - `mapping(address => mapping(address => uint256)) _collected`: Tracking of collected amounts for rollback purposes
 - `address[] _involvedUsers`, `_involvedTokens`: Sets of participants and tokens involved in current cycle (optimization to avoid iterating over all possible addresses)
 
-**Storage Optimization**: Active transaction arrays are compacted after settlement to remove completed entries, maintaining $O(k)$ iteration complexity where $k$ is the number of active transactions rather than $O(n)$ where $n$ is total historical transactions.
+**Storage Optimization**: Active transaction arrays are compacted after settlement to remove completed entries, maintaining efficient iteration over only active transactions rather than all historical transactions.
 
 ### 6.3 Computational Optimization Strategies
 
-**Selective Iteration**: Rather than iterating over all possible participants and tokens, the system maintains dynamic sets `_involvedUsers` and `_involvedTokens` containing only entities with non-zero positions in the current cycle. This reduces iteration complexity from $O(N_{\text{total}} \cdot M_{\text{total}})$ to $O(N_{\text{active}} \cdot M_{\text{active}})$.
+**Selective Iteration**: Rather than iterating over all possible participants and tokens, the system maintains dynamic sets containing only entities with non-zero positions in the current cycle. This reduces iteration complexity significantly.
 
 **Early Termination**: Matching algorithms employ first-match logic, terminating search loops upon finding the first valid counterparty rather than evaluating all possibilities. This reduces average-case complexity though worst-case remains unchanged.
 
 **Batch Atomicity**: All transactions settle within a single blockchain transaction, amortizing fixed costs (base transaction fee, state access costs) across multiple logical operations. The trade-off is that batch size is bounded by block gas limits.
 
-**State Compaction**: After settlement, inactive entries are removed from `activeOrderIds`, `activePaymentIds`, and `activeSwapOrderIds` arrays via reverse iteration and swap-with-last-element removal. This maintains $O(k)$ complexity for subsequent cycles where $k$ is active transaction count.
+**State Compaction**: After settlement, inactive entries are removed from active transaction arrays via reverse iteration and swap-with-last-element removal. This maintains efficient complexity for subsequent cycles.
 
-**Limitation**: Despite these optimizations, the quadratic matching complexity for DvP orders ($O(K \cdot |O|^2)$) remains a scalability bottleneck for order books with thousands of orders per asset.
+**Limitation**: Despite these optimizations, the quadratic matching complexity for DvP orders remains a scalability bottleneck for order books with thousands of orders per asset.
 
 ### 6.4 Security Architecture
 
 **Reentrancy Protection**: The contract inherits OpenZeppelin's `ReentrancyGuard`, applying the `nonReentrant` modifier to all state-modifying external functions. This prevents reentrancy attacks during external calls to ERC20/ERC721 contracts.
 
 **Access Control Enforcement**:
-- Configuration functions: `msg.sender` validation ensures participants can only modify their own configurations
+- Configuration functions: validation ensures participants can only modify their own configurations
 - Payment cancellation: restricted to request recipient
 - Swap cancellation: restricted to order maker and only for unmatched orders
-- No owner privileges: The contract inherits `Ownable` but implements no owner-privileged functionality, eliminating centralized control points
+- No owner privileges: The contract implements no owner-privileged functionality, eliminating centralized control points
 
 **Safe Token Handling**: 
 - ERC721 transfers use `safeTransferFrom` with `IERC721Receiver` interface implementation, preventing token loss to non-receiving contracts
 - ERC20 transfers are wrapped in try-catch blocks during collection, gracefully handling token-level failures
 
-**Atomic Settlement Guarantee**: Settlement logic ensures that either all operations succeed or all revert. Collected funds are tracked in `_collected` mapping, enabling complete refunds upon failure detection.
+**Atomic Settlement Guarantee**: Settlement logic ensures that either all operations succeed or all revert. Collected funds are tracked, enabling complete refunds upon failure detection.
 
 **Denial-of-Service Mitigation**: The iteration bound (50) on DvP chain traversal prevents gas exhaustion attacks where adversaries create arbitrarily long matching chains. However, this also caps legitimate chain length—a trade-off between security and functionality.
 
@@ -601,9 +569,9 @@ The test suite validates:
 
 **Property 1 (Settlement Atomicity)**: Either all matched transactions in a cycle settle successfully, or none do, with collected funds returned.
 
-**Property 2 (Acceptance Constraint Satisfaction)**: No participant receives tokens outside their acceptance set $S_u$.
+**Property 2 (Acceptance Constraint Satisfaction)**: No participant receives tokens outside their acceptance set.
 
-**Property 3 (Conservation)**: For each token $t$, total amount collected equals total amount distributed: $\sum_{u: A_u < 0} C_u^t = \sum_{u: A_u > 0} D_u^t$ where $C_u^t$ is amount collected from $u$ in token $t$ and $D_u^t$ is amount distributed to $u$ in token $t$.
+**Property 3 (Conservation)**: For each token, total amount collected equals total amount distributed.
 
 **Property 4 (Bounded Retry)**: Failed transactions are retried for at most `MAX_FAILED_CYCLES` before cancellation.
 
@@ -612,24 +580,24 @@ All properties are verified through 19 passing test cases covering normal operat
 ### 7.3 Complexity Analysis
 
 **Time Complexity** (per settlement cycle):
-- DvP Matching: $O(K \cdot |O|^2)$ where $K$ is unique assets and $|O|$ is active orders
-- PvP Matching: $O(|S|^2)$ where $|S|$ is active swap orders  
-- Obligation Calculation: $O(|O| + |P| + |S|)$ where $|P|$ is payment requests
-- Aggregation: $O(N \cdot M)$ where $N$ is involved users, $M$ is involved tokens
-- Settlement Execution: $O(N \cdot M)$ for collection/distribution
+- DvP Matching: Quadratic in the number of active orders per unique asset
+- PvP Matching: Quadratic in the number of active swap orders
+- Obligation Calculation: Linear in total number of transactions
+- Aggregation: Linear in number of involved users times number of involved tokens
+- Settlement Execution: Linear in number of involved users times number of involved tokens
 
-**Space Complexity**: $O(N \cdot M)$ for temporary net balance storage during settlement calculation.
+**Space Complexity**: Proportional to number of users times number of tokens for temporary net balance storage during settlement calculation.
 
 The bounded iteration limit (50 iterations for DvP chains) ensures termination but may limit chain length in high-frequency trading scenarios.
 
 ### 7.4 Theoretical Transfer Reduction
 
-Consider a scenario with $N$ participants and $M$ stablecoins where each participant has non-zero net position in each token:
+Consider a scenario with many participants and multiple stablecoins where each participant has non-zero net position in each token:
 
-- **Per-Token Netting**: Requires $O(N \cdot M)$ transfers (each participant-token pair with non-zero position)
-- **Cross-Token Netting** (This Work): Requires $O(N)$ transfers (one per participant with non-zero aggregate across all token implementations of USD)
+- **Per-Token Netting**: Requires separate transfers for each participant-token combination with non-zero position
+- **Cross-Token Netting** (This Work): Requires one transfer per participant with non-zero aggregate across all token implementations of USD
 
-The reduction factor approaches $M$ as token diversity increases, though actual benefit depends on transaction distribution. In the limit where obligations are uniformly distributed across tokens, the transfer count reduction is exactly $M$-fold. In practice, clustering of obligations reduces this benefit.
+The reduction factor increases as token diversity increases, though actual benefit depends on transaction distribution. In the limit where obligations are uniformly distributed across tokens, the transfer count reduction is proportional to the number of distinct tokens. In practice, clustering of obligations reduces this benefit.
 
 ---
 
@@ -657,7 +625,7 @@ Contemporary DeFi protocols implement atomic settlement primitives but lack nett
 
 **Order Book DEXs** (dYdX): Implement order matching with atomic settlement per matched pair. While these systems batch orders, they do not implement multilateral netting—each trade settles independently.
 
-**Architectural Contribution**: This system introduces multilateral netting to the DeFi context, extending beyond atomic per-transaction settlement to cross-transaction obligation offsetting. This represents a structural difference: whereas existing systems settle $n$ transactions with $n$ settlement operations, netting-based systems can settle $n$ transactions with $O(N)$ operations where $N \ll n$ is the number of participants.
+**Architectural Contribution**: This system introduces multilateral netting to the DeFi context, extending beyond atomic per-transaction settlement to cross-transaction obligation offsetting. This represents a structural difference: whereas existing systems settle each transaction independently, netting-based systems can settle many transactions with far fewer actual settlement operations.
 
 ### 8.3 Cross-Chain Settlement Systems
 
@@ -671,11 +639,11 @@ This system operates within a single execution environment (Ethereum), avoiding 
 
 ### 9.1 Economic Assumptions and Depeg Risk
 
-**Assumption**: The cross-token netting mechanism assumes $e_{t,t'} = 1$ for all stablecoin token pairs—i.e., perfect peg maintenance where all token implementations maintain their $1 USD peg.
+**Assumption**: The cross-token netting mechanism assumes all stablecoin tokens maintain their 1:1 peg to USD—i.e., perfect peg maintenance where all token implementations maintain their $1 USD peg.
 
 **Risk**: Depeg events violate this assumption, introducing exchange rate variance. A participant obligated to pay 1000 USDC but receiving 1000 depegged USDT (trading at 0.95 USD) experiences a 5% loss.
 
-**Mitigation Strategy**: This architecture implements decentralized risk management through acceptance constraints. Each participant specifies $S_u$, their acceptable token set, effectively defining an individualized trust model. This shifts depeg risk assessment from the protocol level to the participant level.
+**Mitigation Strategy**: This architecture implements decentralized risk management through acceptance constraints. Each participant specifies their acceptable token set, effectively defining an individualized trust model. This shifts depeg risk assessment from the protocol level to the participant level.
 
 **Limitation**: This approach lacks dynamic repricing. If a depeg occurs between order submission and settlement, the exchange rate assumption becomes invalid. Oracle integration could enable dynamic adjustment but would introduce oracle trust assumptions and additional complexity.
 
@@ -683,7 +651,7 @@ This system operates within a single execution environment (Ethereum), avoiding 
 
 ### 9.2 Computational Complexity and Scalability
 
-**Limitation**: The DvP matching algorithm exhibits $O(K \cdot |O|^2)$ complexity where $K$ is the number of unique assets and $|O|$ is the number of active orders. For large order books, this becomes computationally expensive.
+**Limitation**: The DvP matching algorithm exhibits quadratic complexity where computational cost grows with the square of the number of active orders per asset. For large order books, this becomes computationally expensive.
 
 **Gas Cost Implications**: Settlement cost grows with the number of involved participants and tokens. In Ethereum's gas model, large settlement batches may exceed block gas limits.
 
@@ -709,7 +677,7 @@ This system operates within a single execution environment (Ethereum), avoiding 
 
 ### 9.5 Participant Configuration Requirements
 
-**Requirement**: Users must configure acceptance sets $S_u$ before participating in payment and swap transactions (DvP orders do not have this requirement as payment tokens are explicit).
+**Requirement**: Users must configure acceptance sets before participating in payment and swap transactions (DvP orders do not have this requirement as payment tokens are explicit).
 
 **Trade-off**: This configuration requirement increases user friction but enables the preference-aware settlement mechanism. Alternative designs with default acceptance sets (e.g., "accept all major stablecoins") would reduce friction but eliminate individualized risk management.
 
@@ -760,7 +728,7 @@ This system operates within a single execution environment (Ethereum), avoiding 
 
 ### 10.1 Oracle-Based Dynamic Repricing
 
-The current design assumes fixed exchange rates between stablecoins ($e_{t,t'} = 1$). Future work could integrate price oracles (e.g., Chainlink, Uniswap TWAP) to detect depeg events and dynamically adjust netting calculations. This would require:
+The current design assumes fixed exchange rates between stablecoins (all maintain 1:1 peg). Future work could integrate price oracles (e.g., Chainlink, Uniswap TWAP) to detect depeg events and dynamically adjust netting calculations. This would require:
 
 **Technical Challenge**: Defining acceptable deviation thresholds and handling disagreement between oracle sources. A naive implementation could be exploited through oracle manipulation.
 
@@ -813,14 +781,14 @@ Each approach involves trade-offs between MEV resistance, decentralization, and 
 Recent advances in FHE-enabled blockchains (e.g., Zama's fhEVM, Fhenix) enable computation on encrypted data. An FHE-based clearing house could provide:
 
 **1. Confidential Order Books**
-- Orders submitted as encrypted data: $(a, t_{\text{ID}}, p, \text{side})$ encrypted under FHE scheme
+- Orders submitted as encrypted data
 - Matching occurs on encrypted values without decryption
 - Only matched participants learn counterparty details
 
 **2. Private Net Position Calculation**
 - Each participant's obligations remain encrypted throughout netting calculation
-- $B_{u,t}$ computed homomorphically: encrypted additions across encrypted transaction obligations
-- Aggregate position $A_u = \sum_t B_{u,t}$ computed without revealing per-token positions
+- Calculations performed homomorphically: encrypted additions across encrypted transaction obligations
+- Aggregate position computed without revealing per-token positions
 
 **3. Confidential Settlement**
 - Collection and distribution occur with encrypted amounts
@@ -858,9 +826,9 @@ Decentralized governance (e.g., token-based voting) introduces plutocracy risks;
 
 ## 11. Conclusion
 
-This paper has presented a decentralized clearing house architecture that extends multilateral netting theory to heterogeneous stablecoin ecosystems. The principal contribution is a cross-token netting mechanism that aggregates obligations across technically distinct but economically equivalent settlement instruments—multiple token implementations of the same currency (USD)—reducing settlement dimensionality from $N \times M$ to $N$.
+This paper has presented a decentralized clearing house architecture that extends multilateral netting theory to heterogeneous stablecoin ecosystems. The principal contribution is a cross-token netting mechanism that aggregates obligations across technically distinct but economically equivalent settlement instruments—multiple token implementations of the same currency (USD)—reducing the settlement complexity significantly.
 
-The system integrates three transaction primitives (DvP, direct payments, and PvP swaps) within a unified netting cycle, enabling cross-transaction obligation offsets while respecting participant-level token acceptance constraints. The architecture employs deferred asset locking (custody remains with sellers from order submission until settlement initiation), minimizing capital lock-up duration compared to traditional pre-funding models where assets transfer immediately upon order placement, and implements atomic settlement with bounded retry semantics.
+The system integrates three transaction primitives (DvP, direct payments, and PvP swaps) within a unified netting cycle, enabling cross-transaction obligation offsets while respecting participant-level token acceptance constraints. The architecture employs deferred asset locking (custody remains with sellers from order submission until settlement initiation), minimizing capital lock-up duration compared to traditional pre-funding models, and implements atomic settlement with bounded retry semantics.
 
 **Contributions Relative to State of the Art**:
 - Extension of netting theory to technically heterogeneous token implementations of a single currency
@@ -868,7 +836,7 @@ The system integrates three transaction primitives (DvP, direct payments, and Pv
 - Preference-aware settlement satisfying individual risk management constraints
 - Complete implementation with verified correctness properties
 
-**Limitations and Trade-offs**: The design assumes stable peg maintenance ($e_{t,t'} = 1$), delegating depeg risk management to individual participants through acceptance constraints. Computational complexity remains $O(K \cdot |O|^2)$ for DvP matching, potentially limiting scalability to very large order books. The system lacks formal verification and has not undergone third-party security audit.
+**Limitations and Trade-offs**: The design assumes stable peg maintenance (all tokens maintain 1:1 with USD), delegating depeg risk management to individual participants through acceptance constraints. Computational complexity remains quadratic for DvP matching, potentially limiting scalability to very large order books. The system lacks formal verification and has not undergone third-party security audit.
 
 **Future Research Directions**: 
 1. Integration of price oracles for dynamic depeg detection and repricing
@@ -997,24 +965,13 @@ All tests execute in a local Hardhat environment with simulated ERC20 stablecoin
 
 | Symbol | Definition |
 |--------|------------|
-| $N$ | Number of participants in settlement cycle |
-| $M$ | Number of distinct stablecoin tokens |
-| $U$ | Set of involved users |
-| $T$ | Set of involved tokens |
-| $B_{u,t}$ | Per-token net balance for user $u$ in token $t$ |
-| $A_u$ | Aggregate net position for user $u$ across all tokens |
-| $S_u$ | Acceptance set: tokens user $u$ will accept |
-| $p_u$ | Preferred token for user $u$ |
-| $e_{t,t'}$ | Exchange rate between tokens $t$ and $t'$ |
-| $O_{ij}^k$ | Obligation from participant $i$ to $j$ in token $k$ |
-| $\|O\|$ | Number of active DvP orders |
-| $\|P\|$ | Number of active payment requests |
-| $\|S\|$ | Number of active swap orders |
-| $K$ | Number of unique assets (ERC721 contract-tokenId pairs) |
+| N | Number of participants in settlement cycle |
+| M | Number of distinct stablecoin tokens |
+| U | Set of involved users |
+| T | Set of involved tokens |
 
 ---
 
 ## Acknowledgments
 
 This work was implemented using the Hardhat development environment and OpenZeppelin smart contract libraries. Test infrastructure utilized the Ethereum JavaScript testing framework with Chai assertions.
-
