@@ -10,11 +10,11 @@ This paper presents a decentralized clearing house architecture that extends cla
 
 ## 1. Introduction
 
-Clearing houses represent a foundational component of modern financial infrastructure, serving dual purposes: counterparty risk mitigation through novation, and capital efficiency enhancement through multilateral netting. Traditional clearing arrangements operate under an implicit assumption of currency homogeneity—all participants accept a common settlement medium (typically central bank reserves or equivalent instruments). This homogeneity enables straightforward netting: obligations denominated in the same currency can be offset bilaterally or multilaterally, reducing both the number and volume of settlement transfers.
+Clearing houses represent a foundational component of modern financial infrastructure, serving dual purposes: counterparty risk mitigation through novation, and capital efficiency enhancement through multilateral netting. Traditional clearing arrangements operate under an implicit assumption of currency homogeneity, all participants accept a common settlement medium (typically central bank reserves or equivalent instruments). This homogeneity enables straightforward netting: obligations denominated in the same currency can be offset bilaterally or multilaterally, reducing both the number and volume of settlement transfers.
 
-Blockchain-based settlement systems introduce a novel complication: the proliferation of functionally equivalent yet technically distinct settlement instruments. The contemporary landscape includes multiple USD-pegged stablecoins, each implemented as a separate ERC20 token contract, with combined market capitalization exceeding \$250 billion and at least eight individual tokens surpassing \$1 billion valuation. While these instruments nominally represent claims on the same unit of account (USD), their technical heterogeneity—different contract addresses, issuers, and operational characteristics—precludes direct fungibility at the protocol level.
+Blockchain-based settlement systems introduce a novel complication: the proliferation of functionally equivalent yet technically distinct settlement instruments. The contemporary landscape includes multiple USD-pegged stablecoins, each implemented as a separate ERC20 token contract, with combined market capitalization exceeding \$250 billion and at least eight individual tokens surpassing \$1 billion valuation. While these instruments nominally represent claims on the same unit of account (USD), their technical implimentations (different contract addresses, issuers, and operational characteristics) precludes direct fungibility at the protocol level.
 
-This heterogeneity presents a challenge for clearing house design. Traditional approaches would treat each stablecoin as a distinct currency, requiring separate netting pools and potentially fragmenting liquidity across $M$ dimensions where $M$ represents the number of distinct tokens. Such fragmentation undermines the capital efficiency gains that motivate clearing arrangements in the first instance.
+This heterogeneity presents a challenge for clearing house design. Traditional approaches may treat each stablecoin as a distinct currency, requiring separate netting pools and potentially fragmenting liquidity across the number of distinct tokens. Such fragmentation could undermine the capital efficiency gains that motivate clearing arrangements in the first instance.
 
 ### 1.1 Problem Statement
 
@@ -24,9 +24,9 @@ Formally, consider a clearing system with $N$ participants and $M$ stablecoin to
 
 The design must satisfy the following requirements:
 
-1. **Preference Sovereignty**: Participants specify which tokens they accept, reflecting varying risk tolerance for different stablecoin issuers.
-2. **Capital Efficiency**: Settlement transfers should be minimized by exploiting economic equivalence despite technical heterogeneity.
-3. **Operational Flexibility**: Participants should be able to settle using available token balances across their acceptance set. 
+1. **Preferences**: Participants specify which tokens they accept, reflecting varying risk tolerance for different stablecoin issuers.
+2. **Capital Efficiency**: Settlement transfers should be minimized by using economic equivalence (assuming the user has selected they would accept these tokens) despite technical heterogeneity.
+3. **Operational Flexibility**: Participants should be able to settle using their available token balances across their acceptance set, potentially allowing them to settle with participants who would not accept their token balances. 
 
 
 ### 1.2 Motivation
@@ -35,7 +35,7 @@ The proliferation of stablecoins creates capital fragmentation both within and a
 
 Traditional clearing house designs, when applied naively to multi-stablecoin environments, would preserve this fragmentation by netting each currency independently. A participant owing 1000 USDC and receiving 800 USDT would face two settlement transfers despite both denominating obligations in USD. Scaled across $N$ participants and $M$ tokens, this approach requires up to $N \times M$ transfers per settlement cycle.
 
-This work posits that stablecoin economic equivalence—specifically, the maintained peg to a common unit of account (USD)—enables dimensional reduction in the netting problem. By aggregating obligations across technically distinct token implementations of the same currency, settlement complexity can be reduced to $O(N)$ while respecting individual risk preferences regarding specific token acceptance.
+This work posits that stablecoin economic equivalence, specifically, the maintained peg to a common unit of account (USD), enables a dimensional reduction in the netting problem. By aggregating obligations across technically distinct token implementations of the same currency, settlement complexity can be reduced while respecting individual risk preferences regarding specific token acceptance.
 
 ### 1.3 Contributions
 
@@ -55,7 +55,7 @@ This paper makes the following technical contributions:
 
 ### 2.1 Traditional Clearing Houses
 
-Traditional financial clearing houses operate centralized systems that match trades, calculate net positions, and facilitate settlement. The Depository Trust & Clearing Corporation (DTCC) processes securities trades with T+2 settlement, while CLS Bank handles foreign exchange with T+1 settlement. These systems:
+Traditional financial clearing houses operate centralized systems that match trades, calculate net positions, and facilitate settlement. These systems:
 
 - Require institutional membership and high capital requirements
 - Process settlements in batches on fixed schedules (daily or multi-day)
