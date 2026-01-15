@@ -27,14 +27,28 @@ export default defineConfig({
     },
   },
   networks: {
+    default: {
+      type: "edr-simulated",
+      chainType: "l1",
+      allowUnlimitedContractSize: true,
+      blockGasLimit: 30000000,
+    },
+    hardhat: {
+      type: "edr-simulated",
+      chainType: "l1",
+      allowUnlimitedContractSize: true,
+      blockGasLimit: 30000000,
+    },
     hardhatMainnet: {
       type: "edr-simulated",
       chainType: "l1",
+      allowUnlimitedContractSize: true,
       blockGasLimit: 30000000, // Increase block gas limit for simulation
     },
     hardhatOp: {
       type: "edr-simulated",
       chainType: "op",
+      allowUnlimitedContractSize: true,
       blockGasLimit: 30000000,
     },
     localhost: {

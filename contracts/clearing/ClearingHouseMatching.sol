@@ -13,7 +13,7 @@ abstract contract ClearingHouseMatching is ClearingHouseStorage {
         for (uint256 i = 0; i < activeOrderIds.length; i++) {
             Order storage sellOrder = orders[activeOrderIds[i]];
             if (!sellOrder.active || sellOrder.side != Side.Sell) continue;
-            if (_dvpMatchedOrderId[sellOrder.id] != 0) continue;
+            if (_isSellOrderMatched(sellOrder.id)) continue;
 
             (uint256 buyId, , bool foundBuy) = _findMatchingBuyOrder(sellOrder.asset, sellOrder.tokenId, sellOrder.id);
             if (foundBuy) {
@@ -115,8 +115,8 @@ abstract contract ClearingHouseMatching is ClearingHouseStorage {
         for (uint256 k = 0; k < activeOrderIds.length; k++) {
             Order storage o = orders[activeOrderIds[k]];
             if (o.active && o.side == Side.Buy && o.asset == asset && o.tokenId == tokenId) {
-                if (_dvpMatchedOrderId[o.id] != 0) continue;
-                if (_dvpMatchedOrderId[matchingSellId] != 0) continue;
+                if (_isBuyOrderMatched(o.id)) continue;
+                if (_isSellOrderMatched(matchingSellId)) continue;
                 // Check if this Buy order's token is accepted by the Seller
                 uint256 requiredPrice = sellOrderTerms[matchingSellId][o.paymentToken];
                 
@@ -134,6 +134,50 @@ abstract contract ClearingHouseMatching is ClearingHouseStorage {
                 }
             }
         }
+    }
+
+    function _findMatchedSellOrderId(uint256 buyId) internal view returns (uint256 sellId, bool found) {
+        uint256 direct = _dvpMatchedOrderId[buyId];
+        if (direct != 0) {
+            return (direct, true);
+        }
+        if (buyId == 0) {
+            return (0, false);
+        }
+        for (uint256 i = 0; i < activeOrderIds.length; i++) {
+            Order storage order = orders[activeOrderIds[i]];
+            if (order.active && order.side == Side.Sell && _dvpMatchedOrderId[order.id] == buyId) {
+                return (order.id, true);
+            }
+        }
+        return (0, false);
+    }
+
+    function _findMatchedBuyOrderId(uint256 sellId) internal view returns (uint256 buyId, bool found) {
+        uint256 direct = _dvpMatchedOrderId[sellId];
+        if (direct != 0) {
+            return (direct, true);
+        }
+        if (sellId == 0) {
+            return (0, false);
+        }
+        for (uint256 i = 0; i < activeOrderIds.length; i++) {
+            Order storage order = orders[activeOrderIds[i]];
+            if (order.active && order.side == Side.Buy && _dvpMatchedOrderId[order.id] == sellId) {
+                return (order.id, true);
+            }
+        }
+        return (0, false);
+    }
+
+    function _isBuyOrderMatched(uint256 buyId) internal view returns (bool) {
+        (, bool found) = _findMatchedSellOrderId(buyId);
+        return found;
+    }
+
+    function _isSellOrderMatched(uint256 sellId) internal view returns (bool) {
+        (, bool found) = _findMatchedBuyOrderId(sellId);
+        return found;
     }
 }
 

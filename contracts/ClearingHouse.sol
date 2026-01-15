@@ -202,7 +202,7 @@ contract ClearingHouse is ClearingHouseSettlement {
         require(counterparty != address(0), "Counterparty required");
         require(price > 0, "Price must be positive");
 
-        (uint256 buyId, uint256 buyPrice, address buyToken, bool foundBuy) = _findActiveBuyOrder(asset, tokenId, counterparty);
+        (uint256 _buyId, uint256 buyPrice, address buyToken, bool foundBuy) = _findActiveBuyOrder(asset, tokenId, counterparty);
         if (foundBuy) {
             require(buyPrice == price, "Price must match buy order");
             _setSellOrderTerm(nextOrderId, buyToken, price);
@@ -215,6 +215,7 @@ contract ClearingHouse is ClearingHouseSettlement {
             maker: msg.sender,
             asset: asset,
             tokenId: tokenId,
+            paymentToken: foundBuy ? buyToken : address(0),
             price: price, 
             side: Side.Sell,
             counterparty: counterparty,
@@ -236,7 +237,21 @@ contract ClearingHouse is ClearingHouseSettlement {
         require(order.maker == msg.sender || order.counterparty == msg.sender, "Not authorized");
 
         uint256 matchedId = _dvpMatchedOrderId[orderId];
-        if (matchedId != 0) {
+        if (matchedId == 0) {
+            if (order.side == Side.Buy) {
+                (uint256 sellId, bool foundSell) = _findMatchedSellOrderId(orderId);
+                if (foundSell) {
+                    _dvpMatchedOrderId[sellId] = 0;
+                    _dvpMatchedOrderId[orderId] = 0;
+                }
+            } else if (order.side == Side.Sell) {
+                (uint256 buyId, bool foundBuy) = _findMatchedBuyOrderId(orderId);
+                if (foundBuy) {
+                    _dvpMatchedOrderId[buyId] = 0;
+                    _dvpMatchedOrderId[orderId] = 0;
+                }
+            }
+        } else {
             _dvpMatchedOrderId[matchedId] = 0;
             _dvpMatchedOrderId[orderId] = 0;
         }

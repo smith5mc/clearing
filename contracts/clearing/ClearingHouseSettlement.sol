@@ -54,8 +54,8 @@ abstract contract ClearingHouseSettlement is ClearingHouseMatching {
         for (uint i = 0; i < activeOrderIds.length; i++) {
             Order storage order = orders[activeOrderIds[i]];
             if (!order.active || order.side != Side.Buy) continue;
-            uint256 sellId = _dvpMatchedOrderId[order.id];
-            if (sellId == 0) continue;
+            (uint256 sellId, bool foundSell) = _findMatchedSellOrderId(order.id);
+            if (!foundSell) continue;
             Order storage sellOrder = orders[sellId];
             if (!sellOrder.active) continue;
 
@@ -77,7 +77,9 @@ abstract contract ClearingHouseSettlement is ClearingHouseMatching {
         // Swaps: sendAmount outgoing for each maker
         for (uint i = 0; i < activeSwapOrderIds.length; i++) {
             SwapOrder storage s = swapOrders[activeSwapOrderIds[i]];
-            if (!s.active || s.matchedOrderId == 0) continue;
+            if (!s.active) continue;
+            (, bool foundCounter) = _findMatchedSwapCounterId(s.id);
+            if (!foundCounter) continue;
 
             _addToSet(_cycleParticipants, s.maker);
             _grossOutgoing[s.maker] += s.sendAmount;
@@ -208,8 +210,8 @@ abstract contract ClearingHouseSettlement is ClearingHouseMatching {
         for (uint i = 0; i < activeOrderIds.length; i++) {
             Order storage buyOrder = orders[activeOrderIds[i]];
             if (!buyOrder.active || buyOrder.side != Side.Buy) continue;
-            uint256 sellId = _dvpMatchedOrderId[buyOrder.id];
-            if (sellId == 0) continue;
+            (uint256 sellId, bool foundSell) = _findMatchedSellOrderId(buyOrder.id);
+            if (!foundSell) continue;
             Order storage sellOrder = orders[sellId];
             if (!sellOrder.active) continue;
             if (!_isEligible(buyOrder.maker) || !_isEligible(sellOrder.maker)) continue;
@@ -340,7 +342,7 @@ abstract contract ClearingHouseSettlement is ClearingHouseMatching {
                         _collected[user][token] += toCollect;
                         remaining -= toCollect;
                     } catch {
-                        return false;
+                        return remaining;
                     }
                 }
             }
@@ -390,13 +392,14 @@ abstract contract ClearingHouseSettlement is ClearingHouseMatching {
             int256 aggregate = _aggregateNetBalance[user];
             if (aggregate < 0) {
                 uint256 amountOwed = uint256(-aggregate);
-                uint256 remaining = _collectFromUserWithRemaining(user, amountOwed);
+                // Use already-collected stake first, then collect the remainder.
+                uint256 remaining = _coverWithStake(user, amountOwed);
                 if (remaining > 0) {
-                    remaining = _coverWithStake(user, remaining);
-                    if (remaining > 0) {
-                        _markDefaulter(user);
-                        return (false, true);
-                    }
+                    remaining = _collectFromUserWithRemaining(user, remaining);
+                }
+                if (remaining > 0) {
+                    _markDefaulter(user);
+                    return (false, true);
                 }
             }
         }
@@ -464,8 +467,8 @@ abstract contract ClearingHouseSettlement is ClearingHouseMatching {
         for (uint i = 0; i < activeOrderIds.length; i++) {
             Order storage sellOrder = orders[activeOrderIds[i]];
             if (!sellOrder.active || sellOrder.side != Side.Sell) continue;
-            uint256 buyId = _dvpMatchedOrderId[sellOrder.id];
-            if (buyId == 0) continue;
+            (uint256 buyId, bool foundBuy) = _findMatchedBuyOrderId(sellOrder.id);
+            if (!foundBuy) continue;
             Order storage buyOrder = orders[buyId];
             if (!buyOrder.active) continue;
             if (!_isEligible(buyOrder.maker) || !_isEligible(sellOrder.maker)) continue;
@@ -551,12 +554,12 @@ abstract contract ClearingHouseSettlement is ClearingHouseMatching {
     // DVP FINALIZATION (EXISTING)
     // ============================================================
 
-    function _finalizeOrdersAndAssets(address[] memory assets, uint256[] memory tokenIds, uint256 uniqueCount) internal {
+    function _finalizeOrdersAndAssets(address[] memory, uint256[] memory, uint256) internal {
         for (uint i = 0; i < activeOrderIds.length; i++) {
             Order storage buyOrder = orders[activeOrderIds[i]];
             if (!buyOrder.active || buyOrder.side != Side.Buy) continue;
-            uint256 sellId = _dvpMatchedOrderId[buyOrder.id];
-            if (sellId == 0) continue;
+            (uint256 sellId, bool foundSell) = _findMatchedSellOrderId(buyOrder.id);
+            if (!foundSell) continue;
             Order storage sellOrder = orders[sellId];
             if (!sellOrder.active || !sellOrder.isLocked) continue;
 
@@ -599,17 +602,35 @@ abstract contract ClearingHouseSettlement is ClearingHouseMatching {
     function _finalizeSwaps() internal {
         for (uint i = 0; i < activeSwapOrderIds.length; i++) {
             SwapOrder storage s = swapOrders[activeSwapOrderIds[i]];
-            if (s.active && s.matchedOrderId != 0) {
-                SwapOrder storage counter = swapOrders[s.matchedOrderId];
-                if (!_isEligible(s.maker) || !_isEligible(counter.maker)) continue;
-                // Only emit event once per pair (when processing lower ID)
-                if (s.id < s.matchedOrderId) {
-                    emit SwapSettled(s.id, s.maker, counter.maker);
-                }
+            if (!s.active) continue;
+            (uint256 counterId, bool foundCounter) = _findMatchedSwapCounterId(s.id);
+            if (!foundCounter) continue;
+            SwapOrder storage counter = swapOrders[counterId];
+            if (!_isEligible(s.maker) || !_isEligible(counter.maker)) continue;
+            if (s.id < counterId) {
+                emit SwapSettled(s.id, s.maker, counter.maker);
                 s.active = false;
+                counter.active = false;
+                s.matchedOrderId = 0;
+                counter.matchedOrderId = 0;
             }
         }
         _compactActiveSwaps();
+    }
+
+    function _findMatchedSwapCounterId(uint256 orderId) internal view returns (uint256 counterId, bool found) {
+        SwapOrder storage order = swapOrders[orderId];
+        if (order.matchedOrderId != 0) {
+            return (order.matchedOrderId, true);
+        }
+        for (uint i = 0; i < activeSwapOrderIds.length; i++) {
+            uint256 candidateId = activeSwapOrderIds[i];
+            SwapOrder storage candidate = swapOrders[candidateId];
+            if (candidate.active && candidate.matchedOrderId == orderId) {
+                return (candidateId, true);
+            }
+        }
+        return (0, false);
     }
 
     // ============================================================
