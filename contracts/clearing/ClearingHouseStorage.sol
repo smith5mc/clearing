@@ -119,6 +119,7 @@ contract ClearingHouseStorage is ReentrancyGuard, Ownable, IERC721Receiver {
     address[] internal _cycleParticipants;
     address[] internal _stakeTokens;
     address[] internal _stakedParticipants;
+    address[] internal _defaulters;
 
     // ============ DvP Events ============
 

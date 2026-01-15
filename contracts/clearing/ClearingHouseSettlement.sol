@@ -26,6 +26,27 @@ abstract contract ClearingHouseSettlement is ClearingHouseMatching {
         delete _cycleParticipants;
         delete _stakeTokens;
         delete _stakedParticipants;
+        delete _defaulters;
+    }
+
+    function _clearNettingState() internal {
+        for (uint u = 0; u < _involvedUsers.length; u++) {
+            address user = _involvedUsers[u];
+            delete _aggregateNetBalance[user];
+            for (uint t = 0; t < _involvedTokens.length; t++) {
+                address token = _involvedTokens[t];
+                delete _netBalances[user][token];
+                delete _collected[user][token];
+            }
+        }
+        delete _involvedUsers;
+        delete _involvedTokens;
+    }
+
+    function _markDefaulter(address user) internal {
+        if (!_eligibleInCycle[user]) return;
+        _eligibleInCycle[user] = false;
+        _addToSet(_defaulters, user);
     }
 
     function _buildCycleParticipantsAndGrossOutgoing() internal {
@@ -278,7 +299,8 @@ abstract contract ClearingHouseSettlement is ClearingHouseMatching {
     function _executeAggregatedSettlement() internal returns (bool success) {
         success = true;
 
-        if (!_lockNetTokens()) {
+        (bool locked, ) = _lockNetTokens();
+        if (!locked) {
             return false;
         }
 
@@ -362,7 +384,7 @@ abstract contract ClearingHouseSettlement is ClearingHouseMatching {
         return remaining;
     }
 
-    function _lockNetTokens() internal returns (bool) {
+    function _lockNetTokens() internal returns (bool success, bool hadDefaulter) {
         for (uint u = 0; u < _involvedUsers.length; u++) {
             address user = _involvedUsers[u];
             int256 aggregate = _aggregateNetBalance[user];
@@ -372,13 +394,13 @@ abstract contract ClearingHouseSettlement is ClearingHouseMatching {
                 if (remaining > 0) {
                     remaining = _coverWithStake(user, remaining);
                     if (remaining > 0) {
-                        _eligibleInCycle[user] = false;
-                        return false;
+                        _markDefaulter(user);
+                        return (false, true);
                     }
                 }
             }
         }
-        return true;
+        return (true, false);
     }
 
     function _distributeNetTokens() internal {

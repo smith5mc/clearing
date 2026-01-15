@@ -493,13 +493,30 @@ contract ClearingHouse is ClearingHouseSettlement {
         // 4. Calculate Swap Obligations
         _calculateSwapObligations();
 
-        // 5. Aggregate cross-stablecoin net positions
-        _aggregateNetPositions();
+        // 5. Aggregate cross-stablecoin net positions and lock net tokens
+        bool globalSuccess = false;
+        for (uint attempt = 0; attempt < _cycleParticipants.length + 1; attempt++) {
+            _aggregateNetPositions();
 
-        // 6. Lock net tokens and matched assets before final settlement
-        bool netLocked = _lockNetTokens();
-        bool assetsLocked = netLocked ? _lockMatchedDvPAssets() : false;
-        bool globalSuccess = netLocked && assetsLocked;
+            (bool netLocked, bool hadDefaulter) = _lockNetTokens();
+            if (netLocked) {
+                bool assetsLocked = _lockMatchedDvPAssets();
+                globalSuccess = assetsLocked;
+                break;
+            }
+
+            if (hadDefaulter) {
+                _refundCollectedFunds();
+                _clearNettingState();
+                _calculateMatchedDvPObligations();
+                _calculatePaymentObligations();
+                _calculateSwapObligations();
+                continue;
+            }
+
+            globalSuccess = false;
+            break;
+        }
         
         if (globalSuccess) {
             _distributeNetTokens();
