@@ -75,6 +75,7 @@ contract ClearingHouseStorage is ReentrancyGuard, Ownable, IERC721Receiver {
     // ============ User Configuration State ============
 
     mapping(address => UserConfig) internal _userConfigs;
+    mapping(address => address[]) internal _preferredStablecoinRank;
 
     // ============ Payment State ============
 
@@ -93,6 +94,7 @@ contract ClearingHouseStorage is ReentrancyGuard, Ownable, IERC721Receiver {
     uint256 public lastSettlementTime;
     uint256 public constant SETTLEMENT_INTERVAL = 5 minutes;
     uint256 public constant MAX_FAILED_CYCLES = 2;
+    uint256 public constant STAKE_BPS = 2000; // 20% stake in basis points.
 
     // ============ Temporary Storage for Settlement Calculation ============
 
@@ -105,6 +107,18 @@ contract ClearingHouseStorage is ReentrancyGuard, Ownable, IERC721Receiver {
     
     address[] internal _involvedUsers;
     address[] internal _involvedTokens;
+
+    // ============ Matching & Staking State ============
+
+    mapping(uint256 => uint256) internal _dvpMatchedOrderId;
+    mapping(address => uint256) internal _grossOutgoing;
+    mapping(address => uint256) internal _stakeRequired;
+    mapping(address => bool) internal _eligibleInCycle;
+    mapping(address => mapping(address => uint256)) internal _stakeCollected;
+    mapping(address => uint256) internal _stakeCollectedTotal;
+    address[] internal _cycleParticipants;
+    address[] internal _stakeTokens;
+    address[] internal _stakedParticipants;
 
     // ============ DvP Events ============
 
@@ -120,6 +134,7 @@ contract ClearingHouseStorage is ReentrancyGuard, Ownable, IERC721Receiver {
     event AcceptedTokenAdded(address indexed user, address indexed token);
     event AcceptedTokenRemoved(address indexed user, address indexed token);
     event PreferredTokenChanged(address indexed user, address indexed newToken);
+    event PreferredTokenRankUpdated(address indexed user, address[] rankedTokens);
 
     // ============ Payment Events ============
 
@@ -138,6 +153,13 @@ contract ClearingHouseStorage is ReentrancyGuard, Ownable, IERC721Receiver {
     // ============ Netting Events ============
 
     event CrossStablecoinNetted(address indexed user, int256 aggregateNet, address settledToken, uint256 settledAmount);
+
+    // ============ Matching & Staking Events ============
+
+    event DvPOrderMatched(uint256 indexed sellOrderId, uint256 indexed buyOrderId);
+    event StakeCollected(address indexed user, uint256 amount);
+    event StakeCollectionFailed(address indexed user, uint256 requiredAmount);
+    event StakeDistributed(address indexed user, address indexed token, uint256 amount);
 
     // ============ Constructor ============
 

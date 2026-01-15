@@ -14,6 +14,9 @@ import "./clearing/ClearingHouseSettlement.sol";
  *      Users configure their accepted stablecoins and preferred receive token.
  */
 contract ClearingHouse is ClearingHouseSettlement {
+    mapping(uint256 => address) private _swapReceiveToken;
+
+    event OrderCancelled(uint256 indexed orderId, address indexed cancelledBy);
 
     // ============================================================
     // USER CONFIGURATION
@@ -21,7 +24,7 @@ contract ClearingHouse is ClearingHouseSettlement {
 
     /**
      * @notice Configure accepted stablecoins and preferred receive token
-     * @dev Must be called before participating in payments or swaps
+     * @dev Must be called before participating in transactions
      * @param tokens Array of stablecoin addresses the user will accept
      * @param preferred The stablecoin the user prefers to receive after netting
      */
@@ -44,7 +47,32 @@ contract ClearingHouse is ClearingHouseSettlement {
             isConfigured: true
         });
 
+        _preferredStablecoinRank[msg.sender] = _buildRankFromPreferredCalldata(tokens, preferred);
+
         emit UserConfigured(msg.sender, tokens, preferred);
+        emit PreferredTokenRankUpdated(msg.sender, _preferredStablecoinRank[msg.sender]);
+    }
+
+    /**
+     * @notice Configure accepted stablecoins and ranked preference order
+     * @dev Ranked list must include all accepted stablecoins
+     * @param tokens Array of stablecoin addresses the user will accept
+     * @param rankedPreferred Ranked list of stablecoins (highest preference first)
+     */
+    function configureAcceptedStablecoinsRanked(address[] calldata tokens, address[] calldata rankedPreferred) external nonReentrant {
+        require(tokens.length > 0, "Must accept at least one token");
+        _validateRankedPreferences(tokens, rankedPreferred);
+
+        _userConfigs[msg.sender] = UserConfig({
+            acceptedStablecoins: tokens,
+            preferredStablecoin: rankedPreferred[0],
+            isConfigured: true
+        });
+
+        _preferredStablecoinRank[msg.sender] = rankedPreferred;
+
+        emit UserConfigured(msg.sender, tokens, rankedPreferred[0]);
+        emit PreferredTokenRankUpdated(msg.sender, rankedPreferred);
     }
 
     /**
@@ -95,23 +123,58 @@ contract ClearingHouse is ClearingHouseSettlement {
         require(userAcceptsToken(msg.sender, token), "Token must be in accepted list");
 
         _userConfigs[msg.sender].preferredStablecoin = token;
+        _preferredStablecoinRank[msg.sender] = _buildRankFromPreferredStorage(_userConfigs[msg.sender].acceptedStablecoins, token);
         emit PreferredTokenChanged(msg.sender, token);
+        emit PreferredTokenRankUpdated(msg.sender, _preferredStablecoinRank[msg.sender]);
+    }
+
+    /**
+     * @notice Update ranked preference order
+     * @dev Ranked list must include all accepted stablecoins
+     * @param rankedPreferred Ranked list of stablecoins (highest preference first)
+     */
+    function setPreferredStablecoinRank(address[] calldata rankedPreferred) external nonReentrant {
+        require(_userConfigs[msg.sender].isConfigured, "Must configure first");
+        _validateRankedPreferencesStorage(_userConfigs[msg.sender], rankedPreferred);
+
+        _userConfigs[msg.sender].preferredStablecoin = rankedPreferred[0];
+        _preferredStablecoinRank[msg.sender] = rankedPreferred;
+
+        emit PreferredTokenChanged(msg.sender, rankedPreferred[0]);
+        emit PreferredTokenRankUpdated(msg.sender, rankedPreferred);
+    }
+
+    /**
+     * @notice Get a user's ranked stablecoin preferences
+     */
+    function getPreferredStablecoinRank(address user) external view returns (address[] memory) {
+        return _preferredStablecoinRank[user];
     }
 
     // ============================================================
-    // DVP ORDERS (EXISTING FUNCTIONALITY)
+    // DVP ORDERS (Delivery vs Payment)
     // ============================================================
 
     /**
      * @notice Submit a Buy order.
-     * @dev Buy orders must specify payment token and price.
+     * @dev Counterparty is required; matching is exact on asset/tokenId/price.
      * @param asset The ERC721 contract address.
      * @param tokenId The ID of the token.
      * @param paymentToken The ERC20 token used for payment.
      * @param price The price in paymentToken units.
-     * @param counterparty Optional specific counterparty address (0 for any).
+     * @param counterparty Specific counterparty address.
      */
     function submitBuyOrder(address asset, uint256 tokenId, address paymentToken, uint256 price, address counterparty) external nonReentrant {
+        require(counterparty != address(0), "Counterparty required");
+        require(paymentToken != address(0), "Invalid payment token");
+        require(price > 0, "Price must be positive");
+
+        (uint256 sellId, uint256 sellPrice, bool foundSell) = _findActiveSellOrder(asset, tokenId, counterparty);
+        if (foundSell) {
+            require(sellPrice == price, "Price must match sell order");
+            _setSellOrderTerm(sellId, paymentToken, price);
+        }
+
         uint256 orderId = nextOrderId++;
         
         orders[orderId] = Order({
@@ -133,11 +196,17 @@ contract ClearingHouse is ClearingHouseSettlement {
     }
 
     /**
-     * @notice Submit a Sell order that accepts multiple payment tokens.
+     * @notice Submit a Sell order for an agreed counterparty.
      */
-    function submitMulticurrencySellOrder(address asset, uint256 tokenId, address[] calldata paymentTokens, uint256[] calldata prices, address counterparty) external nonReentrant {
-        require(paymentTokens.length == prices.length, "Length mismatch");
-        require(paymentTokens.length > 0, "No terms provided");
+    function submitSellOrder(address asset, uint256 tokenId, address counterparty, uint256 price) external nonReentrant {
+        require(counterparty != address(0), "Counterparty required");
+        require(price > 0, "Price must be positive");
+
+        (uint256 buyId, uint256 buyPrice, address buyToken, bool foundBuy) = _findActiveBuyOrder(asset, tokenId, counterparty);
+        if (foundBuy) {
+            require(buyPrice == price, "Price must match buy order");
+            _setSellOrderTerm(nextOrderId, buyToken, price);
+        }
 
         uint256 orderId = nextOrderId++;
         
@@ -146,8 +215,7 @@ contract ClearingHouse is ClearingHouseSettlement {
             maker: msg.sender,
             asset: asset,
             tokenId: tokenId,
-            paymentToken: address(0),
-            price: 0, 
+            price: price, 
             side: Side.Sell,
             counterparty: counterparty,
             active: true,
@@ -155,12 +223,32 @@ contract ClearingHouse is ClearingHouseSettlement {
             isLocked: false
         });
 
-        for(uint i = 0; i < paymentTokens.length; i++) {
-            sellOrderTerms[orderId][paymentTokens[i]] = prices[i];
+        activeOrderIds.push(orderId);
+        emit OrderPlaced(orderId, msg.sender, asset, tokenId, Side.Sell, price, counterparty); 
+    }
+
+    /**
+     * @notice Cancel an active DvP order at any time before settlement.
+     */
+    function cancelOrder(uint256 orderId) external nonReentrant {
+        Order storage order = orders[orderId];
+        require(order.active, "Order not active");
+        require(order.maker == msg.sender || order.counterparty == msg.sender, "Not authorized");
+
+        uint256 matchedId = _dvpMatchedOrderId[orderId];
+        if (matchedId != 0) {
+            _dvpMatchedOrderId[matchedId] = 0;
+            _dvpMatchedOrderId[orderId] = 0;
         }
 
-        activeOrderIds.push(orderId);
-        emit OrderPlaced(orderId, msg.sender, asset, tokenId, Side.Sell, prices[0], counterparty); 
+        order.active = false;
+        if (order.isLocked) {
+            order.isLocked = false;
+            IERC721(order.asset).safeTransferFrom(address(this), order.maker, order.tokenId);
+            emit AssetUnlocked(order.id, order.asset, order.tokenId);
+        }
+
+        emit OrderCancelled(orderId, msg.sender);
     }
 
     // ============================================================
@@ -168,87 +256,90 @@ contract ClearingHouse is ClearingHouseSettlement {
     // ============================================================
 
     /**
-     * @notice Create a payment request as recipient
-     * @dev Sender can be address(0) for open requests anyone can fulfill
-     * @param sender The address that should pay (or address(0) for anyone)
+     * @notice Create a payment initiated by the sender
+     * @dev Receiver must accept before settlement
+     * @param recipient The address that should receive
      * @param amount The amount in base units (1e18 = $1)
+     * @param token The stablecoin the sender will pay with
      * @return paymentId The ID of the created payment request
      */
-    function createPaymentRequest(address sender, uint256 amount) external nonReentrant returns (uint256 paymentId) {
-        require(_userConfigs[msg.sender].isConfigured, "Recipient must configure accepted tokens");
+    function createPaymentRequest(address recipient, uint256 amount, address token) external nonReentrant returns (uint256 paymentId) {
+        require(recipient != address(0), "Invalid recipient");
         require(amount > 0, "Amount must be positive");
+        require(token != address(0), "Invalid token");
 
         paymentId = nextPaymentId++;
 
         paymentRequests[paymentId] = PaymentRequest({
             id: paymentId,
-            recipient: msg.sender,
-            sender: sender,
+            recipient: recipient,
+            sender: msg.sender,
             amount: amount,
-            fulfilledToken: address(0),
+            fulfilledToken: token,
             active: true,
             fulfilled: false,
             failedSettlementCycles: 0
         });
 
         activePaymentIds.push(paymentId);
-        emit PaymentRequestCreated(paymentId, msg.sender, sender, amount);
+        emit PaymentRequestCreated(paymentId, recipient, msg.sender, amount);
     }
 
     /**
-     * @notice Fulfill a payment request as sender
-     * @dev Token must be in recipient's accepted stablecoins list
+     * @notice Accept a payment request as receiver
+     * @dev Validates sender and amount only
      * @param paymentId The ID of the payment request
-     * @param token The stablecoin to pay with
+     * @param expectedSender The sender address expected by the receiver
+     * @param expectedAmount The amount expected by the receiver
      */
-    function fulfillPaymentRequest(uint256 paymentId, address token) external nonReentrant {
+    function acceptPaymentRequest(uint256 paymentId, address expectedSender, uint256 expectedAmount) external nonReentrant {
         PaymentRequest storage payment = paymentRequests[paymentId];
         
         require(payment.active, "Payment not active");
         require(!payment.fulfilled, "Already fulfilled");
-        require(payment.sender == address(0) || payment.sender == msg.sender, "Not authorized sender");
-        require(userAcceptsToken(payment.recipient, token), "Token not accepted by recipient");
+        require(payment.recipient == msg.sender, "Only recipient can accept");
+        require(payment.sender == expectedSender, "Sender mismatch");
+        require(payment.amount == expectedAmount, "Amount mismatch");
 
-        payment.sender = msg.sender;
-        payment.fulfilledToken = token;
         payment.fulfilled = true;
 
-        emit PaymentRequestFulfilled(paymentId, msg.sender, token);
+        emit PaymentRequestFulfilled(paymentId, payment.sender, payment.fulfilledToken);
     }
 
     /**
-     * @notice Cancel an unfulfilled payment request
-     * @dev Only recipient can cancel
+     * @notice Cancel a payment request before settlement
+     * @dev Sender or recipient can cancel
      * @param paymentId The ID of the payment request
      */
     function cancelPaymentRequest(uint256 paymentId) external nonReentrant {
         PaymentRequest storage payment = paymentRequests[paymentId];
         
         require(payment.active, "Payment not active");
-        require(payment.recipient == msg.sender, "Only recipient can cancel");
-        require(!payment.fulfilled, "Cannot cancel fulfilled payment");
+        require(payment.recipient == msg.sender || payment.sender == msg.sender, "Not authorized");
 
         payment.active = false;
         emit PaymentRequestCancelled(paymentId);
     }
 
     // ============================================================
-    // PVP SWAP ORDERS (ORDER BOOK STYLE AUTO-MATCHING)
+    // PVP SWAP ORDERS (MATCHED INSTRUCTIONS)
     // ============================================================
 
     /**
      * @notice Submit a swap order
-     * @dev User will send sendAmount of sendToken and receive receiveAmount in any of their accepted tokens
+     * @dev Exact inverse amount and token match is required
      * @param sendAmount Amount to send
      * @param sendToken Token to send (must be in user's accepted list)
      * @param receiveAmount Amount to receive
+     * @param receiveToken Token to receive
      * @return orderId The ID of the created swap order
      */
-    function submitSwapOrder(uint256 sendAmount, address sendToken, uint256 receiveAmount) external nonReentrant returns (uint256 orderId) {
+    function submitSwapOrder(uint256 sendAmount, address sendToken, uint256 receiveAmount, address receiveToken) external nonReentrant returns (uint256 orderId) {
         require(_userConfigs[msg.sender].isConfigured, "Must configure accepted tokens");
         require(sendAmount > 0, "Send amount must be positive");
         require(receiveAmount > 0, "Receive amount must be positive");
         require(sendToken != address(0), "Invalid send token");
+        require(receiveToken != address(0), "Invalid receive token");
 
         orderId = nextSwapOrderId++;
 
@@ -262,17 +353,17 @@ contract ClearingHouse is ClearingHouseSettlement {
             matchedOrderId: 0,
             failedSettlementCycles: 0
         });
+        _swapReceiveToken[orderId] = receiveToken;
 
         activeSwapOrderIds.push(orderId);
 
-        // Try to find a matching counter-order
-        _tryMatchSwapOrder(orderId);
+        // Matching is performed via matchSwapOrders()
 
         emit SwapOrderSubmitted(orderId, msg.sender, sendAmount, sendToken, receiveAmount);
     }
 
     /**
-     * @notice Cancel an unmatched swap order
+     * @notice Cancel a swap order before settlement
      * @param orderId The ID of the swap order
      */
     function cancelSwapOrder(uint256 orderId) external nonReentrant {
@@ -280,10 +371,32 @@ contract ClearingHouse is ClearingHouseSettlement {
         
         require(order.active, "Order not active");
         require(order.maker == msg.sender, "Not order maker");
-        require(order.matchedOrderId == 0, "Cannot cancel matched order");
-
+        
+        uint256 counterId = order.matchedOrderId;
         order.active = false;
+        order.matchedOrderId = 0;
+        order.failedSettlementCycles = 0;
+
+        if (counterId != 0) {
+            SwapOrder storage counter = swapOrders[counterId];
+            if (counter.matchedOrderId == orderId) {
+                counter.matchedOrderId = 0;
+                counter.failedSettlementCycles = 0;
+            }
+        }
+
         emit SwapOrderCancelled(orderId);
+    }
+
+    /**
+     * @notice Match swap orders (callable by anyone)
+     */
+    function matchSwapOrders() external nonReentrant {
+        for (uint i = 0; i < activeSwapOrderIds.length; i++) {
+            uint256 orderId = activeSwapOrderIds[i];
+            if (!swapOrders[orderId].active || swapOrders[orderId].matchedOrderId != 0) continue;
+            _tryMatchSwapOrder(orderId);
+        }
     }
 
     /**
@@ -291,6 +404,7 @@ contract ClearingHouse is ClearingHouseSettlement {
      */
     function _tryMatchSwapOrder(uint256 newOrderId) internal {
         SwapOrder storage newOrder = swapOrders[newOrderId];
+        address newReceiveToken = _swapReceiveToken[newOrderId];
         
         for (uint i = 0; i < activeSwapOrderIds.length; i++) {
             uint256 existingId = activeSwapOrderIds[i];
@@ -299,20 +413,20 @@ contract ClearingHouse is ClearingHouseSettlement {
             SwapOrder storage existing = swapOrders[existingId];
             if (!existing.active || existing.matchedOrderId != 0) continue;
             if (existing.maker == newOrder.maker) continue; // Can't match with self
+            address existingReceiveToken = _swapReceiveToken[existingId];
 
             // Check if orders match:
-            // 1. existing.sendAmount >= newOrder.receiveAmount (existing sends enough for new)
-            // 2. newOrder.sendAmount >= existing.receiveAmount (new sends enough for existing)
-            // 3. existing.sendToken is accepted by newOrder.maker
-            // 4. newOrder.sendToken is accepted by existing.maker
+            // 1. existing.sendAmount == newOrder.receiveAmount
+            // 2. newOrder.sendAmount == existing.receiveAmount
+            // 3. existing.sendToken == newOrder.receiveToken
+            // 4. newOrder.sendToken == existing.receiveToken
             
-            bool amountsMatch = (existing.sendAmount >= newOrder.receiveAmount) && 
-                               (newOrder.sendAmount >= existing.receiveAmount);
+            bool amountsMatch = (existing.sendAmount == newOrder.receiveAmount) && 
+                               (newOrder.sendAmount == existing.receiveAmount);
+            bool tokensMatch = (existing.sendToken == newReceiveToken) &&
+                               (newOrder.sendToken == existingReceiveToken);
             
-            bool tokensAccepted = userAcceptsToken(newOrder.maker, existing.sendToken) &&
-                                  userAcceptsToken(existing.maker, newOrder.sendToken);
-
-            if (amountsMatch && tokensAccepted) {
+            if (amountsMatch && tokensMatch) {
                 // Match found!
                 newOrder.matchedOrderId = existingId;
                 existing.matchedOrderId = newOrderId;
@@ -321,6 +435,32 @@ contract ClearingHouse is ClearingHouseSettlement {
                 break;
             }
         }
+    }
+
+    function _findActiveSellOrder(address asset, uint256 tokenId, address maker) internal view returns (uint256 id, uint256 price, bool found) {
+        for (uint256 i = 0; i < activeOrderIds.length; i++) {
+            Order storage order = orders[activeOrderIds[i]];
+            if (order.active && order.side == Side.Sell && order.asset == asset && order.tokenId == tokenId && order.maker == maker) {
+                return (order.id, order.price, true);
+            }
+        }
+        return (0, 0, false);
+    }
+
+    function _findActiveBuyOrder(address asset, uint256 tokenId, address maker) internal view returns (uint256 id, uint256 price, address paymentToken, bool found) {
+        for (uint256 i = 0; i < activeOrderIds.length; i++) {
+            Order storage order = orders[activeOrderIds[i]];
+            if (order.active && order.side == Side.Buy && order.asset == asset && order.tokenId == tokenId && order.maker == maker) {
+                return (order.id, order.price, order.paymentToken, true);
+            }
+        }
+        return (0, 0, address(0), false);
+    }
+
+    function _setSellOrderTerm(uint256 sellOrderId, address token, uint256 price) internal {
+        uint256 existing = sellOrderTerms[sellOrderId][token];
+        require(existing == 0 || existing == price, "Sell terms mismatch");
+        sellOrderTerms[sellOrderId][token] = price;
     }
 
     // ============================================================
@@ -338,34 +478,38 @@ contract ClearingHouse is ClearingHouseSettlement {
         // Clear temporary storage
         delete _involvedUsers;
         delete _involvedTokens;
-        
-        // 1. Calculate DvP Obligations (existing logic)
-        (address[] memory assets, uint256[] memory tokenIds, uint256 uniqueCount) = _identifyUniqueAssets();
-        for (uint256 i = 0; i < uniqueCount; i++) {
-            _calculateAssetChainObligations(assets[i], tokenIds[i]);
-        }
+        _resetCycleState();
 
-        // 2. Calculate Payment Obligations (NEW)
+        // 1. Build cycle participants and collect stakes
+        _buildCycleParticipantsAndGrossOutgoing();
+        _collectStakes();
+
+        // 2. Calculate DvP Obligations (matched only)
+        _calculateMatchedDvPObligations();
+
+        // 3. Calculate Payment Obligations
         _calculatePaymentObligations();
 
-        // 3. Calculate Swap Obligations (NEW)
+        // 4. Calculate Swap Obligations
         _calculateSwapObligations();
 
-        // 4. Aggregate cross-stablecoin net positions (NEW)
+        // 5. Aggregate cross-stablecoin net positions
         _aggregateNetPositions();
 
-        // 5. Execution Phase with cross-stablecoin netting
-        bool globalSuccess = _executeAggregatedSettlement();
+        // 6. Lock net tokens and matched assets before final settlement
+        bool netLocked = _lockNetTokens();
+        bool assetsLocked = netLocked ? _lockMatchedDvPAssets() : false;
+        bool globalSuccess = netLocked && assetsLocked;
         
         if (globalSuccess) {
-            _finalizeOrdersAndAssets(assets, tokenIds, uniqueCount);
+            _distributeNetTokens();
+            _finalizeOrdersAndAssets(new address[](0), new uint256[](0), 0);
             _finalizePayments();
             _finalizeSwaps();
         } else {
+            _unlockAllLockedDvPAssets();
             _refundCollectedFunds();
-            _handleSettlementFailure();
-            _handlePaymentFailure();
-            _handleSwapFailure();
+            _distributeStakeOnFailure();
             emit SettlementFailed(0, "Global Payment Failure");
         }
 
@@ -375,5 +519,69 @@ contract ClearingHouse is ClearingHouseSettlement {
         }
 
         emit SettlementCompleted(block.timestamp);
+    }
+
+    function _validateRankedPreferences(address[] calldata tokens, address[] calldata rankedPreferred) internal pure {
+        require(rankedPreferred.length == tokens.length, "Ranked list must cover all tokens");
+        for (uint i = 0; i < rankedPreferred.length; i++) {
+            address token = rankedPreferred[i];
+            require(token != address(0), "Invalid token address");
+            bool found = false;
+            for (uint j = 0; j < tokens.length; j++) {
+                if (tokens[j] == token) {
+                    found = true;
+                    break;
+                }
+            }
+            require(found, "Ranked token not accepted");
+            for (uint k = i + 1; k < rankedPreferred.length; k++) {
+                require(rankedPreferred[k] != token, "Duplicate ranked token");
+            }
+        }
+    }
+
+    function _validateRankedPreferencesStorage(UserConfig storage config, address[] calldata rankedPreferred) internal view {
+        require(rankedPreferred.length == config.acceptedStablecoins.length, "Ranked list must cover all tokens");
+        for (uint i = 0; i < rankedPreferred.length; i++) {
+            address token = rankedPreferred[i];
+            require(token != address(0), "Invalid token address");
+            bool found = false;
+            for (uint j = 0; j < config.acceptedStablecoins.length; j++) {
+                if (config.acceptedStablecoins[j] == token) {
+                    found = true;
+                    break;
+                }
+            }
+            require(found, "Ranked token not accepted");
+            for (uint k = i + 1; k < rankedPreferred.length; k++) {
+                require(rankedPreferred[k] != token, "Duplicate ranked token");
+            }
+        }
+    }
+
+    function _buildRankFromPreferredStorage(address[] storage tokens, address preferred) internal view returns (address[] memory) {
+        address[] memory rank = new address[](tokens.length);
+        rank[0] = preferred;
+        uint256 idx = 1;
+        for (uint i = 0; i < tokens.length; i++) {
+            address token = tokens[i];
+            if (token == preferred) continue;
+            rank[idx] = token;
+            idx++;
+        }
+        return rank;
+    }
+
+    function _buildRankFromPreferredCalldata(address[] calldata tokens, address preferred) internal pure returns (address[] memory) {
+        address[] memory rank = new address[](tokens.length);
+        rank[0] = preferred;
+        uint256 idx = 1;
+        for (uint i = 0; i < tokens.length; i++) {
+            address token = tokens[i];
+            if (token == preferred) continue;
+            rank[idx] = token;
+            idx++;
+        }
+        return rank;
     }
 }

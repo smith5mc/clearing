@@ -6,6 +6,176 @@ import "./ClearingHouseMatching.sol";
 abstract contract ClearingHouseSettlement is ClearingHouseMatching {
 
     // ============================================================
+    // CYCLE SETUP & STAKING
+    // ============================================================
+
+    function _resetCycleState() internal {
+        for (uint i = 0; i < _cycleParticipants.length; i++) {
+            address user = _cycleParticipants[i];
+            delete _grossOutgoing[user];
+            delete _stakeRequired[user];
+            delete _eligibleInCycle[user];
+            for (uint t = 0; t < _stakeTokens.length; t++) {
+                address token = _stakeTokens[t];
+                delete _stakeCollected[user][token];
+            }
+        }
+        for (uint t = 0; t < _stakeTokens.length; t++) {
+            delete _stakeCollectedTotal[_stakeTokens[t]];
+        }
+        delete _cycleParticipants;
+        delete _stakeTokens;
+        delete _stakedParticipants;
+    }
+
+    function _buildCycleParticipantsAndGrossOutgoing() internal {
+        // DvP: buyer outgoing only
+        for (uint i = 0; i < activeOrderIds.length; i++) {
+            Order storage order = orders[activeOrderIds[i]];
+            if (!order.active || order.side != Side.Buy) continue;
+            uint256 sellId = _dvpMatchedOrderId[order.id];
+            if (sellId == 0) continue;
+            Order storage sellOrder = orders[sellId];
+            if (!sellOrder.active) continue;
+
+            _addToSet(_cycleParticipants, order.maker);
+            _addToSet(_cycleParticipants, sellOrder.maker);
+            _grossOutgoing[order.maker] += order.price;
+        }
+
+        // Payments: sender outgoing
+        for (uint i = 0; i < activePaymentIds.length; i++) {
+            PaymentRequest storage p = paymentRequests[activePaymentIds[i]];
+            if (!p.active || !p.fulfilled) continue;
+
+            _addToSet(_cycleParticipants, p.sender);
+            _addToSet(_cycleParticipants, p.recipient);
+            _grossOutgoing[p.sender] += p.amount;
+        }
+
+        // Swaps: sendAmount outgoing for each maker
+        for (uint i = 0; i < activeSwapOrderIds.length; i++) {
+            SwapOrder storage s = swapOrders[activeSwapOrderIds[i]];
+            if (!s.active || s.matchedOrderId == 0) continue;
+
+            _addToSet(_cycleParticipants, s.maker);
+            _grossOutgoing[s.maker] += s.sendAmount;
+        }
+    }
+
+    function _collectStakes() internal {
+        for (uint i = 0; i < _cycleParticipants.length; i++) {
+            address user = _cycleParticipants[i];
+            uint256 grossOutgoing = _grossOutgoing[user];
+            uint256 requiredStake = (grossOutgoing * STAKE_BPS) / 10000;
+            _stakeRequired[user] = requiredStake;
+
+            if (requiredStake == 0) {
+                _eligibleInCycle[user] = true;
+                _addToSet(_stakedParticipants, user);
+                continue;
+            }
+
+            bool collected = _collectStakeFromUser(user, requiredStake);
+            if (collected) {
+                _eligibleInCycle[user] = true;
+                _addToSet(_stakedParticipants, user);
+                emit StakeCollected(user, requiredStake);
+            } else {
+                _eligibleInCycle[user] = false;
+                emit StakeCollectionFailed(user, requiredStake);
+            }
+        }
+    }
+
+    function _collectStakeFromUser(address user, uint256 amount) internal returns (bool) {
+        uint256 remaining = amount;
+        address[] storage ranked = _preferredStablecoinRank[user];
+        UserConfig storage config = _userConfigs[user];
+
+        if (ranked.length > 0) {
+            for (uint i = 0; i < ranked.length && remaining > 0; i++) {
+                remaining = _collectStakeToken(user, ranked[i], remaining);
+            }
+        } else if (config.isConfigured) {
+            for (uint i = 0; i < config.acceptedStablecoins.length && remaining > 0; i++) {
+                remaining = _collectStakeToken(user, config.acceptedStablecoins[i], remaining);
+            }
+        }
+
+        if (remaining > 0) {
+            _refundStake(user);
+            return false;
+        }
+        return true;
+    }
+
+    function _collectStakeToken(address user, address token, uint256 remaining) internal returns (uint256) {
+        if (token == address(0)) return remaining;
+        uint256 balance = IERC20(token).balanceOf(user);
+        uint256 allowance = IERC20(token).allowance(user, address(this));
+        uint256 available = balance < allowance ? balance : allowance;
+        if (available == 0) return remaining;
+
+        uint256 toCollect = available < remaining ? available : remaining;
+        try IERC20(token).transferFrom(user, address(this), toCollect) {
+            _stakeCollected[user][token] += toCollect;
+            _stakeCollectedTotal[token] += toCollect;
+            _addToSet(_stakeTokens, token);
+            remaining -= toCollect;
+        } catch {
+            return remaining;
+        }
+        return remaining;
+    }
+
+    function _refundStake(address user) internal {
+        for (uint t = 0; t < _stakeTokens.length; t++) {
+            address token = _stakeTokens[t];
+            uint256 amount = _stakeCollected[user][token];
+            if (amount > 0) {
+                _stakeCollected[user][token] = 0;
+                _stakeCollectedTotal[token] -= amount;
+                IERC20(token).transfer(user, amount);
+            }
+        }
+    }
+
+    function _isEligible(address user) internal view returns (bool) {
+        return _eligibleInCycle[user];
+    }
+
+    function _distributeStakeOnFailure() internal {
+        uint256 totalGross = 0;
+        for (uint i = 0; i < _stakedParticipants.length; i++) {
+            address user = _stakedParticipants[i];
+            if (!_isEligible(user)) continue;
+            totalGross += _grossOutgoing[user];
+        }
+        if (totalGross == 0) return;
+
+        for (uint t = 0; t < _stakeTokens.length; t++) {
+            address token = _stakeTokens[t];
+            uint256 pool = _stakeCollectedTotal[token];
+            if (pool == 0) continue;
+            uint256 remaining = pool;
+
+            for (uint i = 0; i < _stakedParticipants.length; i++) {
+                address user = _stakedParticipants[i];
+                if (!_isEligible(user)) continue;
+                uint256 weight = _grossOutgoing[user];
+                if (weight == 0) continue;
+                uint256 share = (pool * weight) / totalGross;
+                if (share == 0) continue;
+                if (share > remaining) share = remaining;
+                remaining -= share;
+                IERC20(token).transfer(user, share);
+                emit StakeDistributed(user, token, share);
+            }
+        }
+    }
+
+    // ============================================================
     // DVP OBLIGATION CALCULATION (EXISTING)
     // ============================================================
 
@@ -13,45 +183,18 @@ abstract contract ClearingHouseSettlement is ClearingHouseMatching {
      * @dev Simulates the matching chain for a specific asset to calculate net obligations.
      *      Attempts to lock the asset if a match is found.
      */
-    function _calculateAssetChainObligations(address currentAsset, uint256 currentTokenId) internal {
-        address currentOwner = _findLockedOwner(currentAsset, currentTokenId);
-        
-        if (currentOwner == address(0)) {
-            (address seller, bool matchExists) = _findMatchableSeller(currentAsset, currentTokenId);
-            
-            if (matchExists) {
-                currentOwner = _lockSeller(seller, currentAsset, currentTokenId);
-            }
-        }
+    function _calculateMatchedDvPObligations() internal {
+        for (uint i = 0; i < activeOrderIds.length; i++) {
+            Order storage buyOrder = orders[activeOrderIds[i]];
+            if (!buyOrder.active || buyOrder.side != Side.Buy) continue;
+            uint256 sellId = _dvpMatchedOrderId[buyOrder.id];
+            if (sellId == 0) continue;
+            Order storage sellOrder = orders[sellId];
+            if (!sellOrder.active) continue;
+            if (!_isEligible(buyOrder.maker) || !_isEligible(sellOrder.maker)) continue;
 
-        if (currentOwner == address(0)) return;
-
-        bool chainActive = true;
-        uint256 iterations = 0;
-        
-        while (chainActive && iterations < 50) {
-            chainActive = false;
-            iterations++;
-            
-            (uint256 sellId, bool foundSell) = _findSellOrder(currentAsset, currentTokenId, currentOwner);
-
-            if (foundSell) {
-                (uint256 buyId, uint256 buyPrice, bool foundBuy) = _findMatchingBuyOrder(currentAsset, currentTokenId, sellId);
-
-                if (foundBuy) {
-                    Order storage sellOrder = orders[sellId];
-                    Order storage buyOrder = orders[buyId];
-                    
-                    uint256 execPrice = buyPrice;
-                    address payToken = buyOrder.paymentToken;
-
-                    _updateNetBalance(buyOrder.maker, payToken, -int256(execPrice));
-                    _updateNetBalance(sellOrder.maker, payToken, int256(execPrice));
-
-                    currentOwner = buyOrder.maker;
-                    chainActive = true; 
-                }
-            }
+            _updateNetBalance(buyOrder.maker, buyOrder.paymentToken, -int256(buyOrder.price));
+            _updateNetBalance(sellOrder.maker, buyOrder.paymentToken, int256(buyOrder.price));
         }
     }
 
@@ -66,6 +209,7 @@ abstract contract ClearingHouseSettlement is ClearingHouseMatching {
         for (uint i = 0; i < activePaymentIds.length; i++) {
             PaymentRequest storage p = paymentRequests[activePaymentIds[i]];
             if (!p.active || !p.fulfilled) continue;
+            if (!_isEligible(p.sender) || !_isEligible(p.recipient)) continue;
             
             // Sender owes, Recipient receives
             _updateNetBalance(p.sender, p.fulfilledToken, -int256(p.amount));
@@ -85,12 +229,13 @@ abstract contract ClearingHouseSettlement is ClearingHouseMatching {
         for (uint i = 0; i < activeSwapOrderIds.length; i++) {
             SwapOrder storage s = swapOrders[activeSwapOrderIds[i]];
             if (!s.active || s.matchedOrderId == 0) continue;
+            SwapOrder storage counterOrder = swapOrders[s.matchedOrderId];
+            if (!counterOrder.active) continue;
+            if (!_isEligible(s.maker) || !_isEligible(counterOrder.maker)) continue;
             
             // Only process if this order's ID is less than matched order's ID
             // This ensures we process each pair exactly once
             if (s.id > s.matchedOrderId) continue;
-            
-            SwapOrder storage counterOrder = swapOrders[s.matchedOrderId];
             
             // s.maker sends s.sendAmount of s.sendToken
             // s.maker receives counterOrder.sendAmount of counterOrder.sendToken
@@ -132,34 +277,12 @@ abstract contract ClearingHouseSettlement is ClearingHouseMatching {
      */
     function _executeAggregatedSettlement() internal returns (bool success) {
         success = true;
-        
-        // Phase 1: Collect from users with negative aggregate balance
-        for (uint u = 0; u < _involvedUsers.length; u++) {
-            address user = _involvedUsers[u];
-            int256 aggregate = _aggregateNetBalance[user];
-            
-            if (aggregate < 0) {
-                uint256 amountOwed = uint256(-aggregate);
-                bool collected = _collectFromUser(user, amountOwed);
-                if (!collected) {
-                    success = false;
-                    return false;
-                }
-            }
+
+        if (!_lockNetTokens()) {
+            return false;
         }
-        
-        // Phase 2: Distribute to users with positive aggregate balance
-        if (success) {
-            for (uint u = 0; u < _involvedUsers.length; u++) {
-                address user = _involvedUsers[u];
-                int256 aggregate = _aggregateNetBalance[user];
-                
-                if (aggregate > 0) {
-                    _distributeToUser(user, uint256(aggregate));
-                }
-            }
-        }
-        
+
+        _distributeNetTokens();
         return success;
     }
 
@@ -167,8 +290,17 @@ abstract contract ClearingHouseSettlement is ClearingHouseMatching {
      * @dev Collect amount from user using any of their held stablecoins
      */
     function _collectFromUser(address user, uint256 amount) internal returns (bool) {
+        uint256 remaining = _collectFromUserWithRemaining(user, amount);
+        if (remaining == 0) return true;
+
+        // Attempt to cover remaining with user's stake
+        remaining = _coverWithStake(user, remaining);
+        return remaining == 0;
+    }
+
+    function _collectFromUserWithRemaining(address user, uint256 amount) internal returns (uint256 remaining) {
         UserConfig storage config = _userConfigs[user];
-        uint256 remaining = amount;
+        remaining = amount;
         
         // If user is not configured, try to collect from involved tokens directly
         if (!config.isConfigured) {
@@ -190,7 +322,7 @@ abstract contract ClearingHouseSettlement is ClearingHouseMatching {
                     }
                 }
             }
-            return remaining == 0;
+            return remaining;
         }
         
         // Collect from user's accepted stablecoins
@@ -213,7 +345,50 @@ abstract contract ClearingHouseSettlement is ClearingHouseMatching {
             }
         }
         
-        return remaining == 0;
+        return remaining;
+    }
+
+    function _coverWithStake(address user, uint256 remaining) internal returns (uint256) {
+        if (remaining == 0) return 0;
+        for (uint t = 0; t < _stakeTokens.length && remaining > 0; t++) {
+            address token = _stakeTokens[t];
+            uint256 available = _stakeCollected[user][token];
+            if (available == 0) continue;
+            uint256 toUse = available < remaining ? available : remaining;
+            _stakeCollected[user][token] -= toUse;
+            _stakeCollectedTotal[token] -= toUse;
+            remaining -= toUse;
+        }
+        return remaining;
+    }
+
+    function _lockNetTokens() internal returns (bool) {
+        for (uint u = 0; u < _involvedUsers.length; u++) {
+            address user = _involvedUsers[u];
+            int256 aggregate = _aggregateNetBalance[user];
+            if (aggregate < 0) {
+                uint256 amountOwed = uint256(-aggregate);
+                uint256 remaining = _collectFromUserWithRemaining(user, amountOwed);
+                if (remaining > 0) {
+                    remaining = _coverWithStake(user, remaining);
+                    if (remaining > 0) {
+                        _eligibleInCycle[user] = false;
+                        return false;
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
+    function _distributeNetTokens() internal {
+        for (uint u = 0; u < _involvedUsers.length; u++) {
+            address user = _involvedUsers[u];
+            int256 aggregate = _aggregateNetBalance[user];
+            if (aggregate > 0) {
+                _distributeToUser(user, uint256(aggregate));
+            }
+        }
     }
 
     /**
@@ -221,48 +396,77 @@ abstract contract ClearingHouseSettlement is ClearingHouseMatching {
      */
     function _distributeToUser(address user, uint256 amount) internal {
         UserConfig storage config = _userConfigs[user];
-        
-        address distributeToken;
-        if (config.isConfigured && config.preferredStablecoin != address(0)) {
-            distributeToken = config.preferredStablecoin;
-        } else {
-            // Fallback: use first involved token with sufficient balance
-            for (uint t = 0; t < _involvedTokens.length; t++) {
-                if (IERC20(_involvedTokens[t]).balanceOf(address(this)) >= amount) {
-                    distributeToken = _involvedTokens[t];
-                    break;
-                }
+        uint256 remaining = amount;
+        address[] storage ranked = _preferredStablecoinRank[user];
+        bool hasRanked = ranked.length > 0;
+        address preferredFallback = config.preferredStablecoin;
+
+        if (hasRanked) {
+            for (uint i = 0; i < ranked.length && remaining > 0; i++) {
+                address token = ranked[i];
+                if (token == address(0)) continue;
+                uint256 tokenBalance = IERC20(token).balanceOf(address(this));
+                if (tokenBalance == 0) continue;
+                uint256 toSend = tokenBalance < remaining ? tokenBalance : remaining;
+                IERC20(token).transfer(user, toSend);
+                remaining -= toSend;
+                emit CrossStablecoinNetted(user, int256(amount), token, toSend);
+            }
+        } else if (preferredFallback != address(0) && remaining > 0) {
+            uint256 tokenBalance = IERC20(preferredFallback).balanceOf(address(this));
+            if (tokenBalance > 0) {
+                uint256 toSend = tokenBalance < remaining ? tokenBalance : remaining;
+                IERC20(preferredFallback).transfer(user, toSend);
+                remaining -= toSend;
+                emit CrossStablecoinNetted(user, int256(amount), preferredFallback, toSend);
             }
         }
-        
-        if (distributeToken != address(0)) {
-            // Check if we have enough of the preferred token
-            uint256 contractBalance = IERC20(distributeToken).balanceOf(address(this));
-            if (contractBalance >= amount) {
-                IERC20(distributeToken).transfer(user, amount);
-                emit CrossStablecoinNetted(user, int256(amount), distributeToken, amount);
-            } else {
-                // Distribute what we can from preferred, rest from others
-                uint256 remaining = amount;
-                if (contractBalance > 0) {
-                    IERC20(distributeToken).transfer(user, contractBalance);
-                    remaining -= contractBalance;
-                }
-                
-                // Distribute remaining from other tokens
-                for (uint t = 0; t < _involvedTokens.length && remaining > 0; t++) {
-                    address token = _involvedTokens[t];
-                    if (token == distributeToken) continue;
-                    
-                    uint256 tokenBalance = IERC20(token).balanceOf(address(this));
-                    if (tokenBalance > 0) {
-                        uint256 toSend = tokenBalance < remaining ? tokenBalance : remaining;
-                        IERC20(token).transfer(user, toSend);
-                        remaining -= toSend;
-                    }
-                }
-                emit CrossStablecoinNetted(user, int256(amount), distributeToken, amount - remaining);
+
+        // Fallback: distribute remaining from other tokens
+        for (uint t = 0; t < _involvedTokens.length && remaining > 0; t++) {
+            address token = _involvedTokens[t];
+            uint256 tokenBalance = IERC20(token).balanceOf(address(this));
+            if (tokenBalance == 0) continue;
+            uint256 toSend = tokenBalance < remaining ? tokenBalance : remaining;
+            IERC20(token).transfer(user, toSend);
+            remaining -= toSend;
+            emit CrossStablecoinNetted(user, int256(amount), token, toSend);
+        }
+    }
+
+    // ============================================================
+    // DVP ASSET LOCKING (AFTER NETTING)
+    // ============================================================
+
+    function _lockMatchedDvPAssets() internal returns (bool) {
+        for (uint i = 0; i < activeOrderIds.length; i++) {
+            Order storage sellOrder = orders[activeOrderIds[i]];
+            if (!sellOrder.active || sellOrder.side != Side.Sell) continue;
+            uint256 buyId = _dvpMatchedOrderId[sellOrder.id];
+            if (buyId == 0) continue;
+            Order storage buyOrder = orders[buyId];
+            if (!buyOrder.active) continue;
+            if (!_isEligible(buyOrder.maker) || !_isEligible(sellOrder.maker)) continue;
+            if (sellOrder.isLocked) continue;
+
+            try IERC721(sellOrder.asset).safeTransferFrom(sellOrder.maker, address(this), sellOrder.tokenId) {
+                sellOrder.isLocked = true;
+                emit AssetLocked(sellOrder.id, sellOrder.asset, sellOrder.tokenId);
+            } catch {
+                return false;
             }
+        }
+        return true;
+    }
+
+    function _unlockAllLockedDvPAssets() internal {
+        for (uint i = 0; i < activeOrderIds.length; i++) {
+            Order storage sellOrder = orders[activeOrderIds[i]];
+            if (sellOrder.side != Side.Sell) continue;
+            if (!sellOrder.isLocked) continue;
+            sellOrder.isLocked = false;
+            IERC721(sellOrder.asset).safeTransferFrom(address(this), sellOrder.maker, sellOrder.tokenId);
+            emit AssetUnlocked(sellOrder.id, sellOrder.asset, sellOrder.tokenId);
         }
     }
 
@@ -326,39 +530,22 @@ abstract contract ClearingHouseSettlement is ClearingHouseMatching {
     // ============================================================
 
     function _finalizeOrdersAndAssets(address[] memory assets, uint256[] memory tokenIds, uint256 uniqueCount) internal {
-        for (uint256 i = 0; i < uniqueCount; i++) {
-            address currentAsset = assets[i];
-            uint256 currentTokenId = tokenIds[i];
-            
-            address currentOwner = _findLockedOwner(currentAsset, currentTokenId);
-            if (currentOwner == address(0)) continue;
-            address originalSeller = currentOwner;
+        for (uint i = 0; i < activeOrderIds.length; i++) {
+            Order storage buyOrder = orders[activeOrderIds[i]];
+            if (!buyOrder.active || buyOrder.side != Side.Buy) continue;
+            uint256 sellId = _dvpMatchedOrderId[buyOrder.id];
+            if (sellId == 0) continue;
+            Order storage sellOrder = orders[sellId];
+            if (!sellOrder.active || !sellOrder.isLocked) continue;
 
-            bool chainActive = true;
-            uint256 iterations = 0;
-            while (chainActive && iterations < 50) {
-                chainActive = false;
-                iterations++;
-                
-                (uint256 sellId, bool foundSell) = _findSellOrder(currentAsset, currentTokenId, currentOwner);
-               
-                if (foundSell) {
-                    (uint256 buyId, , bool foundBuy) = _findMatchingBuyOrder(currentAsset, currentTokenId, sellId);
-
-                    if (foundBuy) {
-                        orders[sellId].active = false;
-                        orders[buyId].active = false;
-                        currentOwner = orders[buyId].maker;
-                        chainActive = true;
-                    }
-                }
-            }
-            
-            if (currentOwner != originalSeller) {
-                IERC721(currentAsset).safeTransferFrom(address(this), currentOwner, currentTokenId);
-            }
+            sellOrder.active = false;
+            buyOrder.active = false;
+            sellOrder.isLocked = false;
+            _dvpMatchedOrderId[sellOrder.id] = 0;
+            _dvpMatchedOrderId[buyOrder.id] = 0;
+            IERC721(sellOrder.asset).safeTransferFrom(address(this), buyOrder.maker, sellOrder.tokenId);
         }
-        
+
         _compactActiveOrders();
     }
 
@@ -372,7 +559,7 @@ abstract contract ClearingHouseSettlement is ClearingHouseMatching {
     function _finalizePayments() internal {
         for (uint i = 0; i < activePaymentIds.length; i++) {
             PaymentRequest storage p = paymentRequests[activePaymentIds[i]];
-            if (p.active && p.fulfilled) {
+            if (p.active && p.fulfilled && _isEligible(p.sender) && _isEligible(p.recipient)) {
                 p.active = false;
                 emit PaymentSettled(p.id, p.sender, p.recipient, p.amount);
             }
@@ -391,9 +578,10 @@ abstract contract ClearingHouseSettlement is ClearingHouseMatching {
         for (uint i = 0; i < activeSwapOrderIds.length; i++) {
             SwapOrder storage s = swapOrders[activeSwapOrderIds[i]];
             if (s.active && s.matchedOrderId != 0) {
+                SwapOrder storage counter = swapOrders[s.matchedOrderId];
+                if (!_isEligible(s.maker) || !_isEligible(counter.maker)) continue;
                 // Only emit event once per pair (when processing lower ID)
                 if (s.id < s.matchedOrderId) {
-                    SwapOrder storage counter = swapOrders[s.matchedOrderId];
                     emit SwapSettled(s.id, s.maker, counter.maker);
                 }
                 s.active = false;
@@ -512,3 +700,4 @@ abstract contract ClearingHouseSettlement is ClearingHouseMatching {
         }
     }
 }
+

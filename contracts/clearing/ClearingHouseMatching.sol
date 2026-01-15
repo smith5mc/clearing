@@ -4,6 +4,25 @@ pragma solidity ^0.8.28;
 import "./ClearingHouseStorage.sol";
 
 abstract contract ClearingHouseMatching is ClearingHouseStorage {
+
+    /**
+     * @notice Match DvP orders (callable by anyone)
+     * @dev Exact amount matching; payment token can differ and is handled at settlement.
+     */
+    function matchDvPOrders() external nonReentrant {
+        for (uint256 i = 0; i < activeOrderIds.length; i++) {
+            Order storage sellOrder = orders[activeOrderIds[i]];
+            if (!sellOrder.active || sellOrder.side != Side.Sell) continue;
+            if (_dvpMatchedOrderId[sellOrder.id] != 0) continue;
+
+            (uint256 buyId, , bool foundBuy) = _findMatchingBuyOrder(sellOrder.asset, sellOrder.tokenId, sellOrder.id);
+            if (foundBuy) {
+                _dvpMatchedOrderId[sellOrder.id] = buyId;
+                _dvpMatchedOrderId[buyId] = sellOrder.id;
+                emit DvPOrderMatched(sellOrder.id, buyId);
+            }
+        }
+    }
     
     function _identifyUniqueAssets() internal view returns (address[] memory, uint256[] memory, uint256) {
         address[] memory assets = new address[](activeOrderIds.length);
@@ -96,13 +115,15 @@ abstract contract ClearingHouseMatching is ClearingHouseStorage {
         for (uint256 k = 0; k < activeOrderIds.length; k++) {
             Order storage o = orders[activeOrderIds[k]];
             if (o.active && o.side == Side.Buy && o.asset == asset && o.tokenId == tokenId) {
+                if (_dvpMatchedOrderId[o.id] != 0) continue;
+                if (_dvpMatchedOrderId[matchingSellId] != 0) continue;
                 // Check if this Buy order's token is accepted by the Seller
                 uint256 requiredPrice = sellOrderTerms[matchingSellId][o.paymentToken];
                 
                 // If requiredPrice is 0, it means this token is not accepted by the seller
                 if (requiredPrice == 0) continue;
 
-                if (o.price >= requiredPrice) {
+                if (o.price == requiredPrice) {
                     Order storage sell = orders[matchingSellId];
                     Order storage buy = o;
                     
