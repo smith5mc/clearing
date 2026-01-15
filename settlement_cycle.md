@@ -1,44 +1,76 @@
-# Settlement Cycle Logic
-A settlement cycle is every 5 minutes (this is a configured value).
+# Settlement Cycle Logic (Implemented)
+A settlement cycle can be executed once every 5 minutes (configurable interval).
 
-The smart contract works via six stages:
-1) transaction collection, 2) matching, 3) staking, 4) net calculations, 5) locking, and 6) final settlement.
-Transaction collection occurs within the 5 minute cycle; matching and settlement stages can be invoked by anyone.
+The on-chain settlement flow is:
+1) collect cycle participants and gross outgoing,
+2) collect stake,
+3) compute obligations (DvP, Payments, Swaps),
+4) aggregate net positions (cross-stablecoin),
+5) lock net tokens (stake is applied first),
+6) lock DvP assets,
+7) distribute net tokens by preference,
+8) refund unused stake,
+9) finalize orders and payments.
+
+Settlement and matching are callable by anyone. Matching can be invoked at any time and is not tied to the settlement timer.
 
 Transaction collection:
-Transactions are collected over a defined transaction cycle, with both parties to the transaction (buy and sell sides) submitting instructions to the smart contract.
-Both parties identify each other, the transaction leg(s) token, and amount(s).
+Participants submit payment requests, DvP orders, and swap orders at any time. Matched items remain in state until settled or cancelled.
 
 Matching:
-Matching can be called at any time (separate function). A transaction is matched when both parties have submitted instructions with exact amounts.
-Unmatched transactions move into the next transaction collection cycle. Matched transactions remain matched across cycles unless removed.
+Matching is explicit and callable by anyone:
+- DvP: `matchDvPOrders()` pairs buy/sell orders that match on asset, tokenId, price, counterparty, and accepted payment token.
+- Swaps: `matchSwapOrders()` pairs inverse swap orders with exact token and amount symmetry.
+Matched orders stay matched across cycles unless cancelled or failed beyond limits.
 
 Staking:
-Participants are required to pay a stake equal to a configured percentage of their gross outgoing value (start at 20%).
-- DvP: the payment leg amount only
-- PvP: the institution's sendAmount only
-- Payments: the sender amount
-Stake is collected after matching, but before netting, as a single action.
-Stake is collected in the preferred stablecoin, but any accepted stablecoin is allowed (use ranked preference order).
-If a participant's stake is not collected, that participant's transactions are removed from the settlement cycle (but remain matched for the next cycle).
+Stake is based on gross outgoing for eligible participants:
+- DvP: payment leg amount (buyer outgoing)
+- PvP: each maker's `sendAmount`
+- Payments: sender amount
+Stake is collected after cycle participants are identified and before netting.
+Collection order uses the ranked stablecoin preferences, then accepted stablecoins.
+If stake is not collected, the participant is marked ineligible for the cycle.
 
 Net calculations:
-The cash portion (any stablecoin based transfer) of each transaction is calculated on net.
-The first calculation is done without accounting for preferences of received stablecoins.
-Then the contract searches for a disbursement allocation to provide preferred stablecoins.
-If preferred disbursement is unable to be attained, the contract attempts secondary and tertiary preferences in ranked order.
+Obligations are computed per-token:
+- DvP: buyer pays, seller receives
+- Payments: sender pays, recipient receives
+- Swaps: each side pays its `sendToken` and receives the counterparty's `sendToken`
+Only eligible participants are included.
 
-Settlement locking:
-Participants' net tokens are locked within the smart contract after netting, and before final settlement.
-In the event of a default of pay-in, staked tokens are seized and the defaulting parties' transactions are removed from the settlement cycle.
+Aggregate netting:
+Per-token balances are aggregated into a single net position per user (all stablecoins treated as 1:1).
+
+Locking (net tokens):
+For net payers, the contract first applies any collected stake to the net owed amount.
+The remaining amount is collected from the participant's accepted stablecoins.
+If the participant still cannot cover the obligation, they are marked as a defaulter and the cycle restarts without them.
+
+DvP asset locking:
+For matched DvP orders, the seller's ERC721 asset is transferred into contract custody before finalization.
+
+Disbursement:
+Net receivers are paid using their ranked preference list first.
+If the preferred token is insufficient, the contract falls back to the next preferred token, then any involved tokens.
+
+Refund unused stake:
+On successful settlement, any unused stake is returned to participants.
 
 Final settlement:
-Once all tokens are locked, the final stage of disbursement occurs, transferring the tokens and assets to the receivers.
-If netting fails because there are not enough tokens to meet all obligations, the settlement cycle ends,
-all transactions roll to the next cycle, and the stake is distributed to other participants weighted by their gross volume.
+On success:
+- Net tokens are distributed
+- Unused stake is refunded
+- DvP orders transfer the asset to the buyer
+- Swap orders and payment requests are marked inactive
 
-Notes for contract changes:
-- Update `ClearingHouseStorage` to support ranked stablecoin preferences (not a single preferred token).
-- Update `ClearingHouseSettlement` to add the staking stage, stake collection, and stake distribution on failure.
-- Add settlement locking for net tokens before final settlement, and exclude non-stakers from netting.
-- Add a matching entrypoint callable by anyone; only matched transactions advance to staking/netting.
+Failure handling:
+If settlement cannot be completed:
+- Locked DvP assets are returned to makers
+- Collected funds are refunded
+- Stake is distributed to non-defaulters weighted by gross outgoing
+- Matched items remain active for the next cycle unless failed too many times
+
+Notes:
+- Ranked token preferences are stored per user and used for stake collection and payout routing.
+- The contract uses eligibility gates to exclude non-stakers from the settlement cycle.
