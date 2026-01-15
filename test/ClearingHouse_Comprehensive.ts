@@ -3,6 +3,7 @@ import { network } from "hardhat";
 
 const { ethers } = await network.connect();
 const DEBUG = process.env.DEBUG_TESTS === "1";
+const SUMMARY = process.env.SUMMARY_TESTS === "1";
 
 async function increaseTime(seconds: number) {
   await ethers.provider.send("evm_increaseTime", [seconds]);
@@ -24,6 +25,63 @@ function shortAddr(address: string) {
 
 function fmt(amount: bigint, decimals = 18) {
   return ethers.formatUnits(amount, decimals);
+}
+
+function summary(message: string) {
+  if (!SUMMARY) return;
+  console.log(`[Summary] ${message}`);
+}
+
+async function tokenLabel(address: string, tokens: any[]) {
+  if (address === ethers.ZeroAddress) return "NONE";
+  for (const token of tokens) {
+    if (token.target.toLowerCase() === address.toLowerCase()) {
+      return await token.symbol();
+    }
+  }
+  return shortAddr(address);
+}
+
+async function logPreferenceSummary(
+  label: string,
+  clearingHouse: any,
+  users: any[],
+  tokens: any[]
+) {
+  if (!DEBUG) return;
+  const tokenByAddress: Record<string, string> = {};
+  for (const token of tokens) {
+    tokenByAddress[token.target.toLowerCase()] = await token.symbol();
+  }
+  dbg(`\n[Preferences] ${label}`);
+  for (const user of users) {
+    const rank = await clearingHouse.getPreferredStablecoinRank(user.address);
+    const shortRank = rank.map(
+      (token: string) => tokenByAddress[token.toLowerCase()] ?? shortAddr(token)
+    );
+    dbg(`- ${shortAddr(user.address)} prefers: ${shortRank.join(" > ")}`);
+  }
+}
+
+async function logPayoutTokens(
+  label: string,
+  users: any[],
+  tokens: any[],
+  before: Record<string, Record<string, bigint>>,
+  after: Record<string, Record<string, bigint>>
+) {
+  if (!DEBUG) return;
+  dbg(`\n[Payout Tokens] ${label}`);
+  for (const user of users) {
+    const received: string[] = [];
+    for (const token of tokens) {
+      const delta = after[user.address][token.target] - before[user.address][token.target];
+      if (delta > 0n) {
+        received.push(`${await token.symbol()}: ${fmt(delta)}`);
+      }
+    }
+    dbg(`- ${shortAddr(user.address)} received: ${received.length ? received.join(", ") : "none"}`);
+  }
 }
 
 async function getTokenBalances(holder: string, tokens: any[]) {
@@ -112,39 +170,56 @@ async function logStablecoinBalances(
   }
 }
 
-async function logPaymentRequest(label: string, clearingHouse: any, id: number) {
+async function logPaymentRequest(
+  label: string,
+  clearingHouse: any,
+  id: number,
+  tokens: any[]
+) {
   if (!DEBUG) return;
   const p = await clearingHouse.paymentRequests(id);
   dbg(
     `[PaymentRequest:${id}] ${label} active=${p.active} fulfilled=${p.fulfilled} sender=${shortAddr(
       p.sender
-    )} recipient=${shortAddr(p.recipient)} amount=${fmt(
-      p.amount
-    )} token=${shortAddr(p.fulfilledToken)}`
+    )} recipient=${shortAddr(p.recipient)} amount=${fmt(p.amount)} token=${await tokenLabel(
+      p.fulfilledToken,
+      tokens
+    )}`
   );
 }
 
-async function logDvPOrder(label: string, clearingHouse: any, id: number) {
+async function logDvPOrder(
+  label: string,
+  clearingHouse: any,
+  id: number,
+  tokens: any[]
+) {
   if (!DEBUG) return;
   const o = await clearingHouse.orders(id);
   dbg(
     `[DvPOrder:${id}] ${label} active=${o.active} side=${o.side} maker=${shortAddr(
       o.maker
-    )} asset=${shortAddr(o.asset)} tokenId=${o.tokenId} paymentToken=${shortAddr(
-      o.paymentToken
+    )} asset=${shortAddr(o.asset)} tokenId=${o.tokenId} paymentToken=${await tokenLabel(
+      o.paymentToken,
+      tokens
     )} price=${fmt(o.price)} counterparty=${shortAddr(
       o.counterparty
     )} isLocked=${o.isLocked}`
   );
 }
 
-async function logSwapOrder(label: string, clearingHouse: any, id: number) {
+async function logSwapOrder(
+  label: string,
+  clearingHouse: any,
+  id: number,
+  tokens: any[]
+) {
   if (!DEBUG) return;
   const s = await clearingHouse.swapOrders(id);
   dbg(
     `[SwapOrder:${id}] ${label} active=${s.active} maker=${shortAddr(
       s.maker
-    )} sendToken=${shortAddr(s.sendToken)} sendAmount=${fmt(
+    )} sendToken=${await tokenLabel(s.sendToken, tokens)} sendAmount=${fmt(
       s.sendAmount
     )} receiveAmount=${fmt(s.receiveAmount)} matchedOrderId=${s.matchedOrderId}`
   );
@@ -273,7 +348,7 @@ describe("ClearingHouse Comprehensive", function () {
       dbg(
         `[Tx] createPaymentRequest sender=${sender.address} recipient=${recipient.address} amount=${fmt(
           amount
-        )} token=${paymentTokenB.target}`
+        )} token=${await paymentTokenB.symbol()}`
       );
       narrate(
         "The sender creates a payment request, specifying the recipient, amount, and preferred settlement token."
@@ -281,7 +356,10 @@ describe("ClearingHouse Comprehensive", function () {
       await clearingHouse
         .connect(sender)
         .createPaymentRequest(recipient.address, amount, paymentTokenB.target);
-      await logPaymentRequest("after create", clearingHouse, 0);
+      await logPaymentRequest("after create", clearingHouse, 0, [
+        paymentToken,
+        paymentTokenB,
+      ]);
 
       dbg(
         `[Tx] acceptPaymentRequest paymentId=0 sender=${sender.address} amount=${fmt(
@@ -294,7 +372,10 @@ describe("ClearingHouse Comprehensive", function () {
       await clearingHouse
         .connect(recipient)
         .acceptPaymentRequest(0, sender.address, amount);
-      await logPaymentRequest("after accept", clearingHouse, 0);
+      await logPaymentRequest("after accept", clearingHouse, 0, [
+        paymentToken,
+        paymentTokenB,
+      ]);
 
       await logStablecoinBalances("before settlement", [sender, recipient], [
         paymentToken,
@@ -306,7 +387,10 @@ describe("ClearingHouse Comprehensive", function () {
       );
       dbg("[Tx] performSettlement");
       await clearingHouse.performSettlement();
-      await logPaymentRequest("after settlement", clearingHouse, 0);
+      await logPaymentRequest("after settlement", clearingHouse, 0, [
+        paymentToken,
+        paymentTokenB,
+      ]);
 
       const senderFinal = await totalStablecoinBalance(sender, [
         paymentToken,
@@ -358,7 +442,7 @@ describe("ClearingHouse Comprehensive", function () {
       await clearingHouse
         .connect(seller)
         .submitSellOrder(bond.target, 0, buyer.address, price);
-      await logDvPOrder("after submit sell", clearingHouse, 0);
+      await logDvPOrder("after submit sell", clearingHouse, 0, [paymentToken]);
 
       dbg(
         `[Tx] submitBuyOrder buyer=${buyer.address} asset=${bond.target} tokenId=0 paymentToken=${paymentToken.target} price=${fmt(
@@ -371,7 +455,7 @@ describe("ClearingHouse Comprehensive", function () {
       await clearingHouse
         .connect(buyer)
         .submitBuyOrder(bond.target, 0, paymentToken.target, price, seller.address);
-      await logDvPOrder("after submit buy", clearingHouse, 1);
+      await logDvPOrder("after submit buy", clearingHouse, 1, [paymentToken]);
 
       narrate(
         "We invoke matching so the engine pairs the compatible buy and sell orders."
@@ -389,8 +473,8 @@ describe("ClearingHouse Comprehensive", function () {
       dbg("[Tx] performSettlement");
       await clearingHouse.performSettlement();
 
-      await logDvPOrder("after settlement sell", clearingHouse, 0);
-      await logDvPOrder("after settlement buy", clearingHouse, 1);
+      await logDvPOrder("after settlement sell", clearingHouse, 0, [paymentToken]);
+      await logDvPOrder("after settlement buy", clearingHouse, 1, [paymentToken]);
       expect(await bond.ownerOf(0)).to.equal(buyer.address);
     });
   });
@@ -430,7 +514,10 @@ describe("ClearingHouse Comprehensive", function () {
         ethers.parseUnits("900", 18),
         paymentTokenB.target
       );
-      await logSwapOrder("after submit A", clearingHouse, 0);
+      await logSwapOrder("after submit A", clearingHouse, 0, [
+        paymentToken,
+        paymentTokenB,
+      ]);
 
       dbg(
         `[Tx] submitSwapOrder B send=${fmt(
@@ -448,7 +535,10 @@ describe("ClearingHouse Comprehensive", function () {
         ethers.parseUnits("1000", 18),
         paymentToken.target
       );
-      await logSwapOrder("after submit B", clearingHouse, 1);
+      await logSwapOrder("after submit B", clearingHouse, 1, [
+        paymentToken,
+        paymentTokenB,
+      ]);
 
       narrate(
         "We run the matching engine so both swap orders become linked."
@@ -474,8 +564,14 @@ describe("ClearingHouse Comprehensive", function () {
 
       const order0After = await clearingHouse.swapOrders(0);
       const order1After = await clearingHouse.swapOrders(1);
-      await logSwapOrder("after settlement A", clearingHouse, 0);
-      await logSwapOrder("after settlement B", clearingHouse, 1);
+      await logSwapOrder("after settlement A", clearingHouse, 0, [
+        paymentToken,
+        paymentTokenB,
+      ]);
+      await logSwapOrder("after settlement B", clearingHouse, 1, [
+        paymentToken,
+        paymentTokenB,
+      ]);
       expect(order0After.active).to.be.false;
       expect(order1After.active).to.be.false;
     });
@@ -523,7 +619,7 @@ describe("ClearingHouse Comprehensive", function () {
       await clearingHouse
         .connect(users[0])
         .createPaymentRequest(users[1].address, amountA, paymentToken.target);
-      await logPaymentRequest("after create 0", clearingHouse, 0);
+      await logPaymentRequest("after create 0", clearingHouse, 0, [paymentToken]);
 
       dbg(
         `[Tx] acceptPaymentRequest paymentId=0 sender=${users[0].address} amount=${fmt(
@@ -534,7 +630,7 @@ describe("ClearingHouse Comprehensive", function () {
       await clearingHouse
         .connect(users[1])
         .acceptPaymentRequest(0, users[0].address, amountA);
-      await logPaymentRequest("after accept 0", clearingHouse, 0);
+      await logPaymentRequest("after accept 0", clearingHouse, 0, [paymentToken]);
 
       dbg(
         `[Tx] createPaymentRequest sender=${users[2].address} recipient=${users[3].address} amount=${fmt(
@@ -547,7 +643,7 @@ describe("ClearingHouse Comprehensive", function () {
       await clearingHouse
         .connect(users[2])
         .createPaymentRequest(users[3].address, amountB, paymentToken.target);
-      await logPaymentRequest("after create 1", clearingHouse, 1);
+      await logPaymentRequest("after create 1", clearingHouse, 1, [paymentToken]);
 
       dbg(
         `[Tx] acceptPaymentRequest paymentId=1 sender=${users[2].address} amount=${fmt(
@@ -558,7 +654,7 @@ describe("ClearingHouse Comprehensive", function () {
       await clearingHouse
         .connect(users[3])
         .acceptPaymentRequest(1, users[2].address, amountB);
-      await logPaymentRequest("after accept 1", clearingHouse, 1);
+      await logPaymentRequest("after accept 1", clearingHouse, 1, [paymentToken]);
 
       const stakeOnly = amountA / 5n;
       await paymentToken
@@ -580,8 +676,8 @@ describe("ClearingHouse Comprehensive", function () {
       const payment0 = await clearingHouse.paymentRequests(0);
       const payment1 = await clearingHouse.paymentRequests(1);
 
-      await logPaymentRequest("after settlement 0", clearingHouse, 0);
-      await logPaymentRequest("after settlement 1", clearingHouse, 1);
+      await logPaymentRequest("after settlement 0", clearingHouse, 0, [paymentToken]);
+      await logPaymentRequest("after settlement 1", clearingHouse, 1, [paymentToken]);
       await logStablecoinBalances("after settlement", [users[0], users[1], users[2], users[3]], [
         paymentToken,
       ]);
@@ -662,14 +758,17 @@ describe("ClearingHouse Comprehensive", function () {
       dbg(
         `[Tx] createPaymentRequest sender=${shortAddr(
           u0.address
-        )} recipient=${shortAddr(u1.address)} amount=${fmt(payA)} token=${shortAddr(
-          paymentTokenB.target
-        )}`
+        )} recipient=${shortAddr(u1.address)} amount=${fmt(payA)} token=${await paymentTokenB.symbol()}`
       );
       await clearingHouse
         .connect(u0)
         .createPaymentRequest(u1.address, payA, paymentTokenB.target);
-      await logPaymentRequest("after create 0", clearingHouse, 0);
+      await logPaymentRequest("after create 0", clearingHouse, 0, [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+        paymentTokenD,
+      ]);
 
       dbg(
         `[Tx] acceptPaymentRequest paymentId=0 sender=${shortAddr(
@@ -677,7 +776,12 @@ describe("ClearingHouse Comprehensive", function () {
         )} amount=${fmt(payA)}`
       );
       await clearingHouse.connect(u1).acceptPaymentRequest(0, u0.address, payA);
-      await logPaymentRequest("after accept 0", clearingHouse, 0);
+      await logPaymentRequest("after accept 0", clearingHouse, 0, [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+        paymentTokenD,
+      ]);
       grossOutgoing[u0.address] += payA;
       netObligation[u0.address] += payA;
       netObligation[u1.address] -= payA;
@@ -685,14 +789,17 @@ describe("ClearingHouse Comprehensive", function () {
       dbg(
         `[Tx] createPaymentRequest sender=${shortAddr(
           u2.address
-        )} recipient=${shortAddr(u3.address)} amount=${fmt(payB)} token=${shortAddr(
-          paymentTokenC.target
-        )}`
+        )} recipient=${shortAddr(u3.address)} amount=${fmt(payB)} token=${await paymentTokenC.symbol()}`
       );
       await clearingHouse
         .connect(u2)
         .createPaymentRequest(u3.address, payB, paymentTokenC.target);
-      await logPaymentRequest("after create 1", clearingHouse, 1);
+      await logPaymentRequest("after create 1", clearingHouse, 1, [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+        paymentTokenD,
+      ]);
 
       dbg(
         `[Tx] acceptPaymentRequest paymentId=1 sender=${shortAddr(
@@ -700,7 +807,12 @@ describe("ClearingHouse Comprehensive", function () {
         )} amount=${fmt(payB)}`
       );
       await clearingHouse.connect(u3).acceptPaymentRequest(1, u2.address, payB);
-      await logPaymentRequest("after accept 1", clearingHouse, 1);
+      await logPaymentRequest("after accept 1", clearingHouse, 1, [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+        paymentTokenD,
+      ]);
       grossOutgoing[u2.address] += payB;
       netObligation[u2.address] += payB;
       netObligation[u3.address] -= payB;
@@ -709,7 +821,7 @@ describe("ClearingHouse Comprehensive", function () {
       dbg(
         `[Tx] submitSwapOrder A send=${fmt(swapAOut)} ${shortAddr(
           paymentToken.target
-        )} receive=${fmt(swapAIn)} ${shortAddr(paymentTokenB.target)}`
+        )} receive=${fmt(swapAIn)} ${await paymentTokenB.symbol()}`
       );
       await clearingHouse.connect(u0).submitSwapOrder(
         swapAOut,
@@ -717,7 +829,12 @@ describe("ClearingHouse Comprehensive", function () {
         swapAIn,
         paymentTokenB.target
       );
-      await logSwapOrder("after submit A0", clearingHouse, 0);
+      await logSwapOrder("after submit A0", clearingHouse, 0, [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+        paymentTokenD,
+      ]);
       grossOutgoing[u0.address] += swapAOut;
       netObligation[u0.address] += swapAOut;
       netObligation[u0.address] -= swapAIn;
@@ -725,7 +842,7 @@ describe("ClearingHouse Comprehensive", function () {
       dbg(
         `[Tx] submitSwapOrder B send=${fmt(swapAIn)} ${shortAddr(
           paymentTokenB.target
-        )} receive=${fmt(swapAOut)} ${shortAddr(paymentToken.target)}`
+        )} receive=${fmt(swapAOut)} ${await paymentToken.symbol()}`
       );
       await clearingHouse.connect(u2).submitSwapOrder(
         swapAIn,
@@ -733,7 +850,12 @@ describe("ClearingHouse Comprehensive", function () {
         swapAOut,
         paymentToken.target
       );
-      await logSwapOrder("after submit B0", clearingHouse, 1);
+      await logSwapOrder("after submit B0", clearingHouse, 1, [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+        paymentTokenD,
+      ]);
       grossOutgoing[u2.address] += swapAIn;
       netObligation[u2.address] += swapAIn;
       netObligation[u2.address] -= swapAOut;
@@ -741,7 +863,7 @@ describe("ClearingHouse Comprehensive", function () {
       dbg(
         `[Tx] submitSwapOrder C send=${fmt(swapBOut)} ${shortAddr(
           paymentTokenC.target
-        )} receive=${fmt(swapBOut)} ${shortAddr(paymentTokenD.target)}`
+        )} receive=${fmt(swapBOut)} ${await paymentTokenD.symbol()}`
       );
       await clearingHouse.connect(u3).submitSwapOrder(
         swapBOut,
@@ -749,7 +871,12 @@ describe("ClearingHouse Comprehensive", function () {
         swapBOut,
         paymentTokenD.target
       );
-      await logSwapOrder("after submit C0", clearingHouse, 2);
+      await logSwapOrder("after submit C0", clearingHouse, 2, [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+        paymentTokenD,
+      ]);
       grossOutgoing[u3.address] += swapBOut;
       netObligation[u3.address] += swapBOut;
       netObligation[u3.address] -= swapBOut;
@@ -757,7 +884,7 @@ describe("ClearingHouse Comprehensive", function () {
       dbg(
         `[Tx] submitSwapOrder D send=${fmt(swapBOut)} ${shortAddr(
           paymentTokenD.target
-        )} receive=${fmt(swapBOut)} ${shortAddr(paymentTokenC.target)}`
+        )} receive=${fmt(swapBOut)} ${await paymentTokenC.symbol()}`
       );
       await clearingHouse.connect(u4).submitSwapOrder(
         swapBOut,
@@ -765,7 +892,12 @@ describe("ClearingHouse Comprehensive", function () {
         swapBOut,
         paymentTokenC.target
       );
-      await logSwapOrder("after submit D0", clearingHouse, 3);
+      await logSwapOrder("after submit D0", clearingHouse, 3, [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+        paymentTokenD,
+      ]);
       grossOutgoing[u4.address] += swapBOut;
       netObligation[u4.address] += swapBOut;
       netObligation[u4.address] -= swapBOut;
@@ -783,19 +915,29 @@ describe("ClearingHouse Comprehensive", function () {
         )}`
       );
       await clearingHouse.connect(u0).submitSellOrder(bond.target, 0, u2.address, dvpPrice);
-      await logDvPOrder("after submit sell", clearingHouse, 0);
+      await logDvPOrder("after submit sell", clearingHouse, 0, [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+        paymentTokenD,
+      ]);
 
       dbg(
         `[Tx] submitBuyOrder buyer=${shortAddr(
           u2.address
-        )} asset=${shortAddr(bond.target)} tokenId=0 paymentToken=${shortAddr(
-          paymentTokenB.target
-        )} price=${fmt(dvpPrice)} counterparty=${shortAddr(u0.address)}`
+        )} asset=${shortAddr(bond.target)} tokenId=0 paymentToken=${await paymentTokenB.symbol()} price=${fmt(
+          dvpPrice
+        )} counterparty=${shortAddr(u0.address)}`
       );
       await clearingHouse
         .connect(u2)
         .submitBuyOrder(bond.target, 0, paymentTokenB.target, dvpPrice, u0.address);
-      await logDvPOrder("after submit buy", clearingHouse, 1);
+      await logDvPOrder("after submit buy", clearingHouse, 1, [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+        paymentTokenD,
+      ]);
       grossOutgoing[u2.address] += dvpPrice;
       netObligation[u2.address] += dvpPrice;
       netObligation[u0.address] -= dvpPrice;
@@ -883,15 +1025,62 @@ describe("ClearingHouse Comprehensive", function () {
         userBalancesBefore,
         userBalancesAfter
       );
+      await logPayoutTokens(
+        "after settlement",
+        [u0, u1, u2, u3, u4],
+        [paymentToken, paymentTokenB, paymentTokenC, paymentTokenD],
+        userBalancesBefore,
+        userBalancesAfter
+      );
 
-      await logPaymentRequest("after settlement 0", clearingHouse, 0);
-      await logPaymentRequest("after settlement 1", clearingHouse, 1);
-      await logSwapOrder("after settlement A0", clearingHouse, 0);
-      await logSwapOrder("after settlement B0", clearingHouse, 1);
-      await logSwapOrder("after settlement C0", clearingHouse, 2);
-      await logSwapOrder("after settlement D0", clearingHouse, 3);
-      await logDvPOrder("after settlement sell", clearingHouse, 0);
-      await logDvPOrder("after settlement buy", clearingHouse, 1);
+      await logPaymentRequest("after settlement 0", clearingHouse, 0, [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+        paymentTokenD,
+      ]);
+      await logPaymentRequest("after settlement 1", clearingHouse, 1, [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+        paymentTokenD,
+      ]);
+      await logSwapOrder("after settlement A0", clearingHouse, 0, [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+        paymentTokenD,
+      ]);
+      await logSwapOrder("after settlement B0", clearingHouse, 1, [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+        paymentTokenD,
+      ]);
+      await logSwapOrder("after settlement C0", clearingHouse, 2, [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+        paymentTokenD,
+      ]);
+      await logSwapOrder("after settlement D0", clearingHouse, 3, [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+        paymentTokenD,
+      ]);
+      await logDvPOrder("after settlement sell", clearingHouse, 0, [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+        paymentTokenD,
+      ]);
+      await logDvPOrder("after settlement buy", clearingHouse, 1, [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+        paymentTokenD,
+      ]);
 
       await logStablecoinBalances("after settlement", [u0, u1, u2, u3, u4], [
         paymentToken,
@@ -899,10 +1088,440 @@ describe("ClearingHouse Comprehensive", function () {
         paymentTokenC,
         paymentTokenD,
       ]);
+      await logPreferenceSummary(
+        "after settlement",
+        clearingHouse,
+        [u0, u1, u2, u3, u4],
+        [paymentToken, paymentTokenB, paymentTokenC, paymentTokenD]
+      );
 
       expect(await bond.ownerOf(0)).to.equal(u2.address);
       expect((await clearingHouse.paymentRequests(0)).active).to.be.false;
       expect((await clearingHouse.paymentRequests(1)).active).to.be.false;
+      expect((await clearingHouse.swapOrders(0)).active).to.be.false;
+      expect((await clearingHouse.swapOrders(1)).active).to.be.false;
+      expect((await clearingHouse.swapOrders(2)).active).to.be.false;
+      expect((await clearingHouse.swapOrders(3)).active).to.be.false;
+    });
+  });
+
+  describe("Mixed Multi-Token Scenario", function () {
+    beforeEach(async function () {
+      await clearingHouse.connect(users[0]).configureAcceptedStablecoinsRanked(
+        [paymentToken.target, paymentTokenB.target, paymentTokenC.target],
+        [paymentTokenB.target, paymentTokenC.target, paymentToken.target]
+      );
+      await clearingHouse.connect(users[1]).configureAcceptedStablecoinsRanked(
+        [paymentToken.target, paymentTokenB.target, paymentTokenC.target],
+        [paymentToken.target, paymentTokenB.target, paymentTokenC.target]
+      );
+      await clearingHouse.connect(users[2]).configureAcceptedStablecoinsRanked(
+        [paymentToken.target, paymentTokenB.target, paymentTokenC.target],
+        [paymentTokenC.target, paymentTokenB.target, paymentToken.target]
+      );
+      await clearingHouse.connect(users[3]).configureAcceptedStablecoinsRanked(
+        [paymentToken.target, paymentTokenC.target],
+        [paymentTokenC.target, paymentToken.target]
+      );
+      await clearingHouse.connect(users[4]).configureAcceptedStablecoinsRanked(
+        [paymentToken.target, paymentTokenB.target],
+        [paymentTokenB.target, paymentToken.target]
+      );
+    });
+
+    it("Should settle a mixed batch across multiple tokens", async function () {
+      const u0 = users[0];
+      const u1 = users[1];
+      const u2 = users[2];
+      const u3 = users[3];
+      const u4 = users[4];
+
+      const payA = ethers.parseUnits("8", 18);
+      const payB = ethers.parseUnits("5", 18);
+      const payC = ethers.parseUnits("4", 18);
+      const swapAOut = ethers.parseUnits("3", 18);
+      const swapAIn = ethers.parseUnits("4", 18);
+      const swapBOut = ethers.parseUnits("2", 18);
+      const dvpPrice = ethers.parseUnits("9", 18);
+
+      narrate(
+        "This scenario mixes payments, swaps, and a DvP order across multiple tokens, then settles everything in one cycle."
+      );
+
+      await logStablecoinBalances("initial", [u0, u1, u2, u3, u4], [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+      ]);
+
+      const grossOutgoing: Record<string, bigint> = {
+        [u0.address]: 0n,
+        [u1.address]: 0n,
+        [u2.address]: 0n,
+        [u3.address]: 0n,
+        [u4.address]: 0n,
+      };
+      const netObligation: Record<string, bigint> = {
+        [u0.address]: 0n,
+        [u1.address]: 0n,
+        [u2.address]: 0n,
+        [u3.address]: 0n,
+        [u4.address]: 0n,
+      };
+
+      narrate("We start with three payment requests using different tokens.");
+      summary("Payments: 3 requests across TKA/TKB/TKC");
+      dbg(
+        `[Tx] createPaymentRequest sender=${shortAddr(
+          u0.address
+        )} recipient=${shortAddr(u1.address)} amount=${fmt(payA)} token=${await paymentTokenB.symbol()}`
+      );
+      await clearingHouse
+        .connect(u0)
+        .createPaymentRequest(u1.address, payA, paymentTokenB.target);
+      await logPaymentRequest("after create 0", clearingHouse, 0, [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+      ]);
+
+      dbg(
+        `[Tx] acceptPaymentRequest paymentId=0 sender=${shortAddr(
+          u0.address
+        )} amount=${fmt(payA)}`
+      );
+      await clearingHouse.connect(u1).acceptPaymentRequest(0, u0.address, payA);
+      await logPaymentRequest("after accept 0", clearingHouse, 0, [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+      ]);
+      grossOutgoing[u0.address] += payA;
+      netObligation[u0.address] += payA;
+      netObligation[u1.address] -= payA;
+
+      dbg(
+        `[Tx] createPaymentRequest sender=${shortAddr(
+          u2.address
+        )} recipient=${shortAddr(u3.address)} amount=${fmt(payB)} token=${await paymentTokenC.symbol()}`
+      );
+      await clearingHouse
+        .connect(u2)
+        .createPaymentRequest(u3.address, payB, paymentTokenC.target);
+      await logPaymentRequest("after create 1", clearingHouse, 1, [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+      ]);
+
+      dbg(
+        `[Tx] acceptPaymentRequest paymentId=1 sender=${shortAddr(
+          u2.address
+        )} amount=${fmt(payB)}`
+      );
+      await clearingHouse.connect(u3).acceptPaymentRequest(1, u2.address, payB);
+      await logPaymentRequest("after accept 1", clearingHouse, 1, [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+      ]);
+      grossOutgoing[u2.address] += payB;
+      netObligation[u2.address] += payB;
+      netObligation[u3.address] -= payB;
+
+      dbg(
+        `[Tx] createPaymentRequest sender=${shortAddr(
+          u4.address
+        )} recipient=${shortAddr(u1.address)} amount=${fmt(payC)} token=${await paymentToken.symbol()}`
+      );
+      await clearingHouse
+        .connect(u4)
+        .createPaymentRequest(u1.address, payC, paymentToken.target);
+      await logPaymentRequest("after create 2", clearingHouse, 2, [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+      ]);
+
+      dbg(
+        `[Tx] acceptPaymentRequest paymentId=2 sender=${shortAddr(
+          u4.address
+        )} amount=${fmt(payC)}`
+      );
+      await clearingHouse.connect(u1).acceptPaymentRequest(2, u4.address, payC);
+      await logPaymentRequest("after accept 2", clearingHouse, 2, [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+      ]);
+      grossOutgoing[u4.address] += payC;
+      netObligation[u4.address] += payC;
+      netObligation[u1.address] -= payC;
+
+      narrate("Next we add swap pairs with different tokens.");
+      summary("Swaps: 2 matched pairs across TKA/TKB/TKC");
+      dbg(
+        `[Tx] submitSwapOrder A send=${fmt(swapAOut)} ${shortAddr(
+          paymentToken.target
+        )} receive=${fmt(swapAIn)} ${await paymentTokenB.symbol()}`
+      );
+      await clearingHouse.connect(u0).submitSwapOrder(
+        swapAOut,
+        paymentToken.target,
+        swapAIn,
+        paymentTokenB.target
+      );
+      await logSwapOrder("after submit A0", clearingHouse, 0, [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+      ]);
+      grossOutgoing[u0.address] += swapAOut;
+      netObligation[u0.address] += swapAOut;
+      netObligation[u0.address] -= swapAIn;
+
+      dbg(
+        `[Tx] submitSwapOrder B send=${fmt(swapAIn)} ${shortAddr(
+          paymentTokenB.target
+        )} receive=${fmt(swapAOut)} ${await paymentToken.symbol()}`
+      );
+      await clearingHouse.connect(u4).submitSwapOrder(
+        swapAIn,
+        paymentTokenB.target,
+        swapAOut,
+        paymentToken.target
+      );
+      await logSwapOrder("after submit B0", clearingHouse, 1, [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+      ]);
+      grossOutgoing[u4.address] += swapAIn;
+      netObligation[u4.address] += swapAIn;
+      netObligation[u4.address] -= swapAOut;
+
+      dbg(
+        `[Tx] submitSwapOrder C send=${fmt(swapBOut)} ${shortAddr(
+          paymentTokenC.target
+        )} receive=${fmt(swapBOut)} ${await paymentToken.symbol()}`
+      );
+      await clearingHouse.connect(u3).submitSwapOrder(
+        swapBOut,
+        paymentTokenC.target,
+        swapBOut,
+        paymentToken.target
+      );
+      await logSwapOrder("after submit C0", clearingHouse, 2, [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+      ]);
+      grossOutgoing[u3.address] += swapBOut;
+      netObligation[u3.address] += swapBOut;
+      netObligation[u3.address] -= swapBOut;
+
+      dbg(
+        `[Tx] submitSwapOrder D send=${fmt(swapBOut)} ${shortAddr(
+          paymentToken.target
+        )} receive=${fmt(swapBOut)} ${await paymentTokenC.symbol()}`
+      );
+      await clearingHouse.connect(u1).submitSwapOrder(
+        swapBOut,
+        paymentToken.target,
+        swapBOut,
+        paymentTokenC.target
+      );
+      await logSwapOrder("after submit D0", clearingHouse, 3, [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+      ]);
+      grossOutgoing[u1.address] += swapBOut;
+      netObligation[u1.address] += swapBOut;
+      netObligation[u1.address] -= swapBOut;
+
+      narrate("We match all swaps so the engine links complementary orders.");
+      dbg("[Tx] matchSwapOrders");
+      await clearingHouse.matchSwapOrders();
+
+      narrate("Now we add a DvP order priced in a different token (TKC).");
+      summary("DvP: 1 matched pair priced in TKC");
+      dbg(
+        `[Tx] submitSellOrder seller=${shortAddr(
+          u0.address
+        )} asset=${shortAddr(bond.target)} tokenId=0 price=${fmt(dvpPrice)} counterparty=${shortAddr(
+          u2.address
+        )}`
+      );
+      await clearingHouse.connect(u0).submitSellOrder(bond.target, 0, u2.address, dvpPrice);
+      await logDvPOrder("after submit sell", clearingHouse, 0, [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+      ]);
+
+      dbg(
+        `[Tx] submitBuyOrder buyer=${shortAddr(
+          u2.address
+        )} asset=${shortAddr(bond.target)} tokenId=0 paymentToken=${await paymentTokenC.symbol()} price=${fmt(
+          dvpPrice
+        )} counterparty=${shortAddr(u0.address)}`
+      );
+      await clearingHouse
+        .connect(u2)
+        .submitBuyOrder(bond.target, 0, paymentTokenC.target, dvpPrice, u0.address);
+      await logDvPOrder("after submit buy", clearingHouse, 1, [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+      ]);
+      grossOutgoing[u2.address] += dvpPrice;
+      netObligation[u2.address] += dvpPrice;
+      netObligation[u0.address] -= dvpPrice;
+
+      narrate("We match the DvP orders and prepare to settle.");
+      dbg("[Tx] matchDvPOrders");
+      await clearingHouse.matchDvPOrders();
+
+      await logStablecoinBalances("before settlement", [u0, u1, u2, u3, u4], [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+      ]);
+      await logContractBalances("before settlement", clearingHouse, [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+      ]);
+      narrate("Stake and locking plans are computed from gross outgoing and net obligations.");
+      logStakeAndLockPlan(
+        "before settlement",
+        [u0, u1, u2, u3, u4],
+        grossOutgoing,
+        netObligation
+      );
+
+      const userBalancesBefore: Record<string, Record<string, bigint>> = {};
+      for (const user of [u0, u1, u2, u3, u4]) {
+        userBalancesBefore[user.address] = await getTokenBalances(user.address, [
+          paymentToken,
+          paymentTokenB,
+          paymentTokenC,
+        ]);
+      }
+      const contractBalancesBefore = await getTokenBalances(clearingHouse.target, [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+      ]);
+
+      narrate("Settlement nets all obligations, applies stake, and finalizes transfers.");
+      summary("Settlement: stake, lock, distribute, finalize");
+      await increaseTime(301);
+      dbg("[Tx] performSettlement");
+      await clearingHouse.performSettlement();
+
+      const userBalancesAfter: Record<string, Record<string, bigint>> = {};
+      for (const user of [u0, u1, u2, u3, u4]) {
+        userBalancesAfter[user.address] = await getTokenBalances(user.address, [
+          paymentToken,
+          paymentTokenB,
+          paymentTokenC,
+        ]);
+      }
+      const contractBalancesAfter = await getTokenBalances(clearingHouse.target, [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+      ]);
+
+      narrate("Stake pay-ins and locking pay-ins are visible as contract balance increases before distribution.");
+      await logContractBalances("after settlement", clearingHouse, [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+      ]);
+
+      dbg("\n[Contract Delta] settlement cycle");
+      for (const token of [paymentToken, paymentTokenB, paymentTokenC]) {
+        const delta = contractBalancesAfter[token.target] - contractBalancesBefore[token.target];
+        dbg(`- ${await token.symbol()}: ${fmt(delta)}`);
+      }
+
+      narrate("Contract payouts to participants are reflected in per-user deltas.");
+      await logUserDeltas(
+        "after settlement",
+        [u0, u1, u2, u3, u4],
+        [paymentToken, paymentTokenB, paymentTokenC],
+        userBalancesBefore,
+        userBalancesAfter
+      );
+      await logPayoutTokens(
+        "after settlement",
+        [u0, u1, u2, u3, u4],
+        [paymentToken, paymentTokenB, paymentTokenC],
+        userBalancesBefore,
+        userBalancesAfter
+      );
+
+      await logPaymentRequest("after settlement 0", clearingHouse, 0, [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+      ]);
+      await logPaymentRequest("after settlement 1", clearingHouse, 1, [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+      ]);
+      await logSwapOrder("after settlement A0", clearingHouse, 0, [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+      ]);
+      await logSwapOrder("after settlement B0", clearingHouse, 1, [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+      ]);
+      await logSwapOrder("after settlement C0", clearingHouse, 2, [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+      ]);
+      await logSwapOrder("after settlement D0", clearingHouse, 3, [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+      ]);
+      await logDvPOrder("after settlement sell", clearingHouse, 0, [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+      ]);
+      await logDvPOrder("after settlement buy", clearingHouse, 1, [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+      ]);
+
+      await logStablecoinBalances("after settlement", [u0, u1, u2, u3, u4], [
+        paymentToken,
+        paymentTokenB,
+        paymentTokenC,
+      ]);
+      await logPreferenceSummary(
+        "after settlement",
+        clearingHouse,
+        [u0, u1, u2, u3, u4],
+        [paymentToken, paymentTokenB, paymentTokenC]
+      );
+      summary("Multi-token batch complete: all orders settled");
+
+      expect(await bond.ownerOf(0)).to.equal(u2.address);
+      expect((await clearingHouse.paymentRequests(0)).active).to.be.false;
+      expect((await clearingHouse.paymentRequests(1)).active).to.be.false;
+      expect((await clearingHouse.paymentRequests(2)).active).to.be.false;
       expect((await clearingHouse.swapOrders(0)).active).to.be.false;
       expect((await clearingHouse.swapOrders(1)).active).to.be.false;
       expect((await clearingHouse.swapOrders(2)).active).to.be.false;

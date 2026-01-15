@@ -202,7 +202,7 @@ contract ClearingHouse is ClearingHouseSettlement {
         require(counterparty != address(0), "Counterparty required");
         require(price > 0, "Price must be positive");
 
-        (uint256 _buyId, uint256 buyPrice, address buyToken, bool foundBuy) = _findActiveBuyOrder(asset, tokenId, counterparty);
+        (uint256 buyPrice, address buyToken, bool foundBuy) = _findActiveBuyOrder(asset, tokenId, counterparty);
         if (foundBuy) {
             require(buyPrice == price, "Price must match buy order");
             _setSellOrderTerm(nextOrderId, buyToken, price);
@@ -462,14 +462,14 @@ contract ClearingHouse is ClearingHouseSettlement {
         return (0, 0, false);
     }
 
-    function _findActiveBuyOrder(address asset, uint256 tokenId, address maker) internal view returns (uint256 id, uint256 price, address paymentToken, bool found) {
+    function _findActiveBuyOrder(address asset, uint256 tokenId, address maker) internal view returns (uint256 price, address paymentToken, bool found) {
         for (uint256 i = 0; i < activeOrderIds.length; i++) {
             Order storage order = orders[activeOrderIds[i]];
             if (order.active && order.side == Side.Buy && order.asset == asset && order.tokenId == tokenId && order.maker == maker) {
-                return (order.id, order.price, order.paymentToken, true);
+                return (order.price, order.paymentToken, true);
             }
         }
-        return (0, 0, address(0), false);
+        return (0, address(0), false);
     }
 
     function _setSellOrderTerm(uint256 sellOrderId, address token, uint256 price) internal {
@@ -534,6 +534,7 @@ contract ClearingHouse is ClearingHouseSettlement {
         }
         
         if (globalSuccess) {
+            _refundUnusedStake();
             _distributeNetTokens();
             _finalizeOrdersAndAssets(new address[](0), new uint256[](0), 0);
             _finalizePayments();

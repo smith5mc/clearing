@@ -198,6 +198,20 @@ abstract contract ClearingHouseSettlement is ClearingHouseMatching {
         }
     }
 
+    function _refundUnusedStake() internal {
+        for (uint i = 0; i < _stakedParticipants.length; i++) {
+            address user = _stakedParticipants[i];
+            for (uint t = 0; t < _stakeTokens.length; t++) {
+                address token = _stakeTokens[t];
+                uint256 amount = _stakeCollected[user][token];
+                if (amount == 0) continue;
+                _stakeCollected[user][token] = 0;
+                _stakeCollectedTotal[token] -= amount;
+                IERC20(token).transfer(user, amount);
+            }
+        }
+    }
+
     // ============================================================
     // DVP OBLIGATION CALCULATION (EXISTING)
     // ============================================================
