@@ -42,6 +42,7 @@ type DvP = {
   counterparty?: string;
   status: DvPStatus;
   matchedId?: string;
+  sellTerms?: Record<string, number>;
 };
 
 type TokenMap = Record<string, number>;
@@ -76,10 +77,19 @@ const TOKENS: Token[] = [
   { id: 'TKD', symbol: 'TKD', color: '#b5179e' },
 ];
 
+const shuffleTokens = (tokens: string[]) => {
+  const shuffled = [...tokens];
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
+  return shuffled;
+};
+
 const DEFAULT_USERS: User[] = Array.from({ length: 5 }).map((_, i) => ({
   id: `U${i + 1}`,
   name: `User ${i + 1}`,
-  preferences: ['TKA', 'TKB', 'TKC', 'TKD'],
+  preferences: shuffleTokens(['TKA', 'TKB', 'TKC', 'TKD']),
   balances: {
     TKA: 1000,
     TKB: 1000,
@@ -103,8 +113,6 @@ const cloneTokenMap = (map: TokenMap) =>
 
 const createId = (prefix: string) =>
   `${prefix}-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
-
-const clampNonNegative = (value: number) => (value < 0 ? 0 : value);
 
 const collectFromBalances = (
   balances: TokenMap,
@@ -159,6 +167,7 @@ const matchSwaps = (swaps: Swap[]) => {
     for (let j = i + 1; j < updated.length; j++) {
       const b = updated[j];
       if (b.status !== 'open' || b.matchedId) continue;
+      if (a.maker === b.maker) continue;
       const isMatch =
         a.sendToken === b.receiveToken &&
         a.receiveToken === b.sendToken &&
@@ -176,22 +185,64 @@ const matchSwaps = (swaps: Swap[]) => {
   return updated;
 };
 
+const resolveDvPPaymentToken = (order: DvP, byId: Map<string, DvP>) => {
+  if (order.side === 'buy') return order.paymentToken;
+  if (order.matchedId) {
+    const matched = byId.get(order.matchedId);
+    if (matched && matched.side === 'buy') return matched.paymentToken;
+  }
+  if (order.paymentToken) return order.paymentToken;
+  if (order.sellTerms) {
+    const token = Object.keys(order.sellTerms)[0];
+    if (token) return token;
+  }
+  return TOKENS[0]?.id ?? '';
+};
+
+const formatDvPTerms = (order: DvP) => {
+  if (order.side === 'buy') return `${order.price} ${order.paymentToken}`;
+  const terms = order.sellTerms ?? {};
+  const entries = Object.entries(terms);
+  if (entries.length === 0) return `${order.price} (no token terms)`;
+  return entries.map(([token, price]) => `${price} ${token}`).join(', ');
+};
+
 const matchDvps = (dvps: DvP[]) => {
-  const updated = dvps.map(d => ({ ...d }));
+  const updated = dvps.map(d => ({
+    ...d,
+    sellTerms: d.sellTerms ? { ...d.sellTerms } : d.sellTerms,
+  }));
   for (let i = 0; i < updated.length; i++) {
     const a = updated[i];
     if (a.status !== 'open' || a.matchedId) continue;
     for (let j = i + 1; j < updated.length; j++) {
       const b = updated[j];
       if (b.status !== 'open' || b.matchedId) continue;
+      if (a.maker === b.maker) continue;
       const sides = a.side !== b.side;
       const sameAsset = a.assetId === b.assetId;
-      const sameToken = a.paymentToken === b.paymentToken;
       const samePrice = roundAmount(a.price) === roundAmount(b.price);
-      const counterpartyOk =
-        (!a.counterparty || a.counterparty === b.maker) &&
-        (!b.counterparty || b.counterparty === a.maker);
-      if (sides && sameAsset && sameToken && samePrice && counterpartyOk) {
+      if (!sides || !sameAsset || !samePrice) continue;
+      if (!a.counterparty || !b.counterparty) continue;
+      const counterpartyOk = a.counterparty === b.maker && b.counterparty === a.maker;
+      if (!counterpartyOk) continue;
+
+      const buy = a.side === 'buy' ? a : b;
+      const sell = a.side === 'sell' ? a : b;
+      const terms = sell.sellTerms ?? {};
+      const termPrice = terms[buy.paymentToken];
+      if (termPrice !== undefined && roundAmount(termPrice) !== roundAmount(buy.price)) {
+        continue;
+      }
+      if (termPrice === undefined) {
+        sell.sellTerms = { ...terms, [buy.paymentToken]: buy.price };
+      }
+
+      if (sell.sellTerms && sell.sellTerms[buy.paymentToken] === undefined) {
+        continue;
+      }
+
+      if (counterpartyOk) {
         a.status = 'matched';
         b.status = 'matched';
         a.matchedId = b.id;
@@ -245,7 +296,10 @@ const runSettlementSimulation = ({
       s => s.status === 'matched' && !excludedUsers.has(s.maker)
     );
     const activeDvps = currentDvps.filter(
-      d => d.status === 'matched' && !excludedUsers.has(d.maker)
+      d =>
+        d.status === 'matched' &&
+        !excludedUsers.has(d.maker) &&
+        (!d.counterparty || !excludedUsers.has(d.counterparty))
     );
     return { activePayments, activeSwaps, activeDvps };
   };
@@ -331,18 +385,20 @@ const runSettlementSimulation = ({
       );
     }
 
+    const dvpById = new Map(currentDvps.map(dvp => [dvp.id, dvp]));
     for (const dvp of activeDvps) {
       ensureUser(dvp.maker);
+      const paymentToken = resolveDvPPaymentToken(dvp, dvpById);
       if (dvp.side === 'buy') {
         grossOutgoing[dvp.maker] = roundAmount(
           grossOutgoing[dvp.maker] + dvp.price
         );
-        perTokenNet[dvp.maker][dvp.paymentToken] = roundAmount(
-          perTokenNet[dvp.maker][dvp.paymentToken] - dvp.price
+        perTokenNet[dvp.maker][paymentToken] = roundAmount(
+          perTokenNet[dvp.maker][paymentToken] - dvp.price
         );
       } else {
-        perTokenNet[dvp.maker][dvp.paymentToken] = roundAmount(
-          perTokenNet[dvp.maker][dvp.paymentToken] + dvp.price
+        perTokenNet[dvp.maker][paymentToken] = roundAmount(
+          perTokenNet[dvp.maker][paymentToken] + dvp.price
         );
       }
     }
@@ -616,6 +672,7 @@ export default function App() {
     price: 120,
     counterparty: '',
   });
+  const [dvpError, setDvpError] = useState<string | null>(null);
 
   const addPayment = useCallback(() => {
     const payment: Payment = {
@@ -643,17 +700,98 @@ export default function App() {
   }, [newSwap]);
 
   const addDvP = useCallback(() => {
+    const counterparty = newDvP.counterparty.trim();
+    if (!counterparty) {
+      setDvpError('Counterparty required for DvP orders.');
+      return;
+    }
+    if (counterparty === newDvP.maker) {
+      setDvpError('Counterparty must be different from maker.');
+      return;
+    }
+    const price = roundAmount(newDvP.price);
+    const isBuy = newDvP.side === 'buy';
+    const paymentToken = isBuy ? newDvP.paymentToken : '';
+
+    const existing = stateRef.current.dvps;
+    if (isBuy) {
+      const conflictingSell = existing.find(order => {
+        if (order.side !== 'sell') return false;
+        if (order.status !== 'open') return false;
+        if (order.assetId !== newDvP.assetId) return false;
+        if (order.maker !== counterparty) return false;
+        if (order.counterparty !== newDvP.maker) return false;
+        const term = order.sellTerms?.[paymentToken];
+        return term !== undefined && roundAmount(term) !== price;
+      });
+      if (conflictingSell) {
+        setDvpError('Sell order terms mismatch for this asset/token.');
+        return;
+      }
+    } else {
+      const conflictingBuy = existing.find(order => {
+        if (order.side !== 'buy') return false;
+        if (order.status !== 'open') return false;
+        if (order.assetId !== newDvP.assetId) return false;
+        if (order.maker !== counterparty) return false;
+        if (order.counterparty !== newDvP.maker) return false;
+        return roundAmount(order.price) !== price;
+      });
+      if (conflictingBuy) {
+        setDvpError('Buy order price must match sell order.');
+        return;
+      }
+    }
+
+    setDvpError(null);
     const order: DvP = {
       id: createId('dvp'),
       maker: newDvP.maker,
       side: newDvP.side,
       assetId: newDvP.assetId,
-      paymentToken: newDvP.paymentToken,
-      price: roundAmount(newDvP.price),
-      counterparty: newDvP.counterparty || undefined,
+      paymentToken,
+      price,
+      counterparty,
       status: 'open',
+      sellTerms: newDvP.side === 'sell' ? {} : undefined,
     };
-    setDvps(prev => [order, ...prev]);
+
+    setDvps(prev => {
+      const next = prev.map(existingOrder => ({
+        ...existingOrder,
+        sellTerms: existingOrder.sellTerms
+          ? { ...existingOrder.sellTerms }
+          : existingOrder.sellTerms,
+      }));
+
+      if (isBuy) {
+        for (const existingOrder of next) {
+          if (existingOrder.side !== 'sell') continue;
+          if (existingOrder.status !== 'open') continue;
+          if (existingOrder.assetId !== order.assetId) continue;
+          if (existingOrder.maker !== counterparty) continue;
+          if (existingOrder.counterparty !== order.maker) continue;
+          const terms = existingOrder.sellTerms ?? {};
+          if (terms[paymentToken] === undefined) {
+            existingOrder.sellTerms = { ...terms, [paymentToken]: price };
+          }
+        }
+      } else {
+        const sellTerms: Record<string, number> = {};
+        for (const existingOrder of next) {
+          if (existingOrder.side !== 'buy') continue;
+          if (existingOrder.status !== 'open') continue;
+          if (existingOrder.assetId !== order.assetId) continue;
+          if (existingOrder.maker !== counterparty) continue;
+          if (existingOrder.counterparty !== order.maker) continue;
+          if (roundAmount(existingOrder.price) !== price) continue;
+          sellTerms[existingOrder.paymentToken] = price;
+        }
+        order.sellTerms = sellTerms;
+      }
+
+      return [order, ...next];
+    });
   }, [newDvP]);
 
   const acceptPayment = (id: string) => {
@@ -767,10 +905,11 @@ export default function App() {
           maker: 'U1',
           side: 'sell',
           assetId: 1,
-          paymentToken: 'TKB',
+          paymentToken: '',
           price: 12,
           counterparty: 'U3',
           status: 'open',
+          sellTerms: { TKB: 12 },
         },
         {
           id: createId('dvp'),
@@ -854,10 +993,11 @@ export default function App() {
           maker: 'U1',
           side: 'sell',
           assetId: 1,
-          paymentToken: 'TKC',
+          paymentToken: '',
           price: 9,
           counterparty: 'U3',
           status: 'open',
+          sellTerms: { TKC: 9 },
         },
         {
           id: createId('dvp'),
@@ -938,15 +1078,21 @@ export default function App() {
       const maker = pick();
       const side = Math.random() > 0.5 ? 'buy' : 'sell';
       const assetId = 1 + Math.floor(Math.random() * 3);
+      let counterparty = pick();
+      while (counterparty === maker) counterparty = pick();
+      const paymentToken = tokenPick();
+      const price = roundAmount(10 + Math.random() * 40);
       setDvps(prev => [
         {
           id: createId('dvp'),
           maker,
           side,
           assetId,
-          paymentToken: tokenPick(),
-          price: roundAmount(10 + Math.random() * 40),
+          paymentToken: side === 'buy' ? paymentToken : '',
+          price,
+          counterparty,
           status: 'open',
+          sellTerms: side === 'sell' ? { [paymentToken]: price } : undefined,
         },
         ...prev,
       ]);
@@ -1110,6 +1256,7 @@ export default function App() {
             <select
               value={newDvP.paymentToken}
               onChange={e => setNewDvP(s => ({ ...s, paymentToken: e.target.value }))}
+              disabled={newDvP.side === 'sell'}
             >
               {TOKENS.map(t => <option key={t.id} value={t.id}>{t.symbol}</option>)}
             </select>
@@ -1123,13 +1270,19 @@ export default function App() {
               value={newDvP.counterparty}
               onChange={e => setNewDvP(s => ({ ...s, counterparty: e.target.value }))}
             >
-              <option value="">Any counterparty</option>
+              <option value="">Select counterparty</option>
               {users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
             </select>
           </div>
           <div className="button-row">
-            <button onClick={addDvP}>Add DvP</button>
+            <button onClick={addDvP} disabled={!newDvP.counterparty.trim()}>
+              Add DvP
+            </button>
           </div>
+          {dvpError && <p className="muted">{dvpError}</p>}
+          <p className="muted">
+            Buy orders specify the payment token; sell orders define terms once a counterparty is set.
+          </p>
         </section>
 
         <section>
@@ -1201,7 +1354,7 @@ export default function App() {
               {payments.map(payment => (
                 <div key={payment.id} className={`card status-${payment.status}`}>
                   <div className="card-row">
-                    <span>{payment.sender} -> {payment.recipient}</span>
+                    <span>{payment.sender} -&gt; {payment.recipient}</span>
                     <span>{payment.amount} {payment.token}</span>
                   </div>
                   <div className="card-row">
@@ -1221,7 +1374,7 @@ export default function App() {
                   <div className="card-row">
                     <span>{swap.maker}</span>
                     <span>
-                      {swap.sendAmount} {swap.sendToken} -> {swap.receiveAmount} {swap.receiveToken}
+                      {swap.sendAmount} {swap.sendToken} -&gt; {swap.receiveAmount} {swap.receiveToken}
                     </span>
                   </div>
                   <div className="card-row">
@@ -1241,7 +1394,7 @@ export default function App() {
                     <span>{order.side.toUpperCase()} Asset {order.assetId}</span>
                   </div>
                   <div className="card-row">
-                    <span>{order.price} {order.paymentToken}</span>
+                    <span>{formatDvPTerms(order)}</span>
                     <span>Status: {order.status}</span>
                   </div>
                 </div>
@@ -1265,65 +1418,90 @@ export default function App() {
               )}
             </div>
 
-            <h3>Cycle Steps</h3>
+            <h3>1. Cycle Steps</h3>
             <ul className="steps">
               {latestReport.steps.map((step, idx) => (
                 <li key={`${latestReport.id}-${idx}`}>{step}</li>
               ))}
             </ul>
 
-            <h3>Net Positions (All Tokens)</h3>
+            <h3>2. Stake Collected</h3>
+            <div className="table">
+              <div className="table-row header">
+                <span>User</span>
+                <span>Collected</span>
+                {TOKENS.map(token => (
+                  <span key={`stake-header-${token.id}`}>{token.symbol}</span>
+                ))}
+              </div>
+              {latestReport.participants.length === 0 && (
+                <div className="table-row">
+                  <span className="muted">No participants were eligible.</span>
+                </div>
+              )}
+              {latestReport.participants.map(userId => {
+                const collected = latestReport.stakeCollected[userId] || blankTokenMap();
+                return (
+                  <div key={`stake-${userId}`} className="table-row">
+                    <span>{userId}</span>
+                    <span>{sumTokens(collected).toFixed(2)}</span>
+                    {TOKENS.map(token => (
+                      <span key={`${userId}-stake-${token.id}`}>
+                        {(collected[token.id] || 0).toFixed(2)}
+                      </span>
+                    ))}
+                  </div>
+                );
+              })}
+            </div>
+
+            <h3>3. Net & Locked</h3>
             <div className="table">
               <div className="table-row header">
                 <span>User</span>
                 <span>Net</span>
-                <span>Gross Outgoing</span>
+                <span>Locked</span>
+                <span>Gross</span>
               </div>
               {Object.keys(latestReport.netPositions).map(userId => (
                 <div key={userId} className="table-row">
                   <span>{userId}</span>
                   <span>{latestReport.netPositions[userId].toFixed(2)}</span>
+                  <span>{sumTokens(latestReport.lockCollected[userId] || blankTokenMap()).toFixed(2)}</span>
                   <span>{(latestReport.grossOutgoing[userId] || 0).toFixed(2)}</span>
                 </div>
               ))}
             </div>
 
-            <h3>Token Pool & Payouts</h3>
+            <h3>4. Results</h3>
             <div className="table">
               <div className="table-row header">
-                <span>Token</span>
-                <span>Pool Before</span>
-                <span>Pool After</span>
+                <span>User</span>
+                <span>Net</span>
+                {TOKENS.map(token => (
+                  <span key={`result-header-${token.id}`}>{token.symbol}</span>
+                ))}
               </div>
-              {TOKENS.map(token => (
-                <div key={token.id} className="table-row">
-                  <span>{token.symbol}</span>
-                  <span>{(latestReport.poolBeforePayout[token.id] || 0).toFixed(2)}</span>
-                  <span>{(latestReport.poolAfterPayout[token.id] || 0).toFixed(2)}</span>
+              {latestReport.participants.length === 0 && (
+                <div className="table-row">
+                  <span className="muted">No participants were eligible.</span>
                 </div>
-              ))}
+              )}
+              {latestReport.participants.map(userId => {
+                const perToken = latestReport.perTokenNet[userId] || blankTokenMap();
+                return (
+                  <div key={`result-${userId}`} className="table-row">
+                    <span>{userId}</span>
+                    <span>{sumTokens(perToken).toFixed(2)}</span>
+                    {TOKENS.map(token => (
+                      <span key={`${userId}-result-${token.id}`}>
+                        {(perToken[token.id] || 0).toFixed(2)}
+                      </span>
+                    ))}
+                  </div>
+                );
+              })}
             </div>
-
-            <h3>Payout Routing</h3>
-            {Object.keys(latestReport.payouts).length === 0 && (
-              <p className="muted">No payouts in this cycle.</p>
-            )}
-            {Object.entries(latestReport.payouts).map(([userId, payout]) => (
-              <div key={userId} className="card">
-                <div className="card-row">
-                  <strong>{userId}</strong>
-                  <span>Total {sumTokens(payout).toFixed(2)}</span>
-                </div>
-                <div className="token-grid">
-                  {TOKENS.map(token => (
-                    <div key={`${userId}-${token.id}`} className="token-chip">
-                      <span style={{ color: token.color }}>{token.symbol}</span>
-                      <span>{(payout[token.id] || 0).toFixed(2)}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ))}
           </>
         )}
       </aside>
@@ -1375,6 +1553,7 @@ function FlowGraph({
   const activePayments = payments.filter(p => p.status !== 'settled');
   const activeSwaps = swaps.filter(s => s.status !== 'settled');
   const activeDvps = dvps.filter(d => d.status !== 'settled');
+  const dvpById = useMemo(() => new Map(dvps.map(dvp => [dvp.id, dvp])), [dvps]);
 
   return (
     <div ref={containerRef} className="graph-container">
@@ -1420,7 +1599,8 @@ function FlowGraph({
         {activeDvps.map(order => {
           const maker = lookup.get(order.maker);
           if (!maker) return null;
-          const token = TOKENS.find(t => t.id === order.paymentToken);
+          const tokenId = resolveDvPPaymentToken(order, dvpById);
+          const token = TOKENS.find(t => t.id === tokenId);
           const color = token?.color || '#8b949e';
           return (
             <g key={order.id}>
