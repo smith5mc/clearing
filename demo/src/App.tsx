@@ -1,2039 +1,1444 @@
-import { useEffect, useState, useRef, useCallback } from 'react';
-import { ethers } from 'ethers';
-import config from './config.json';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import './App.css';
 
-// ============================================================================
-// TYPES
-// ============================================================================
-interface Order {
+type Token = { id: string; symbol: string; color: string };
+type User = {
   id: string;
-  orderId: number;
-  userId: string;
-  type: 'BUY' | 'SELL';
-  asset: string;
-  assetAddress: string;
-  tokenId: number;
-  price: string;
-  priceRaw: bigint;
-  paymentToken: string;
-  counterparty: string;
-  color: string;
-  status: 'pending' | 'matched' | 'clearing';
-  createdAt: number;
-  matchedWith?: string; // ID of matched order
-}
-
-interface PaymentRequest {
-  id: string;
-  paymentId: number;
-  recipient: string;
-  sender: string;
-  amount: string;
-  amountRaw: bigint;
-  status: 'pending' | 'fulfilled' | 'settled' | 'cancelled';
-  createdAt: number;
-  fulfilledToken?: string;
-}
-
-interface SwapOrder {
-  id: string;
-  orderId: number;
-  maker: string;
-  sendAmount: string;
-  sendAmountRaw: bigint;
-  sendToken: string;
-  receiveAmount: string;
-  receiveAmountRaw: bigint;
-  status: 'pending' | 'matched' | 'settled';
-  createdAt: number;
-  matchedOrderId?: number;
-}
-
-
-interface LogEntry {
-  time: string;
-  msg: string;
-  type: 'info' | 'success' | 'error' | 'match' | 'payment' | 'swap';
-}
-
-// ============================================================================
-// CONSTANTS
-// ============================================================================
-const CENTER_RADIUS = 35;
-const USER_RADIUS = 12;
-const LAYOUT_RADIUS = 220;
-
-const COLORS = {
-  background: '#0d1117',
-  center: '#e63946',
-  centerGlow: 'rgba(230, 57, 70, 0.3)',
-  user: '#4cc9f0',
-  userGlow: 'rgba(76, 201, 240, 0.2)',
-  buy: '#06d6a0',
-  sell: '#ffd166',
-  match: '#00ff00',
-  text: '#e6edf3',
-  textMuted: '#8b949e',
-  panelBg: '#161b22',
-  panelBorder: '#30363d',
+  name: string;
+  preferences: string[];
+  balances: Record<string, number>;
 };
 
-// ============================================================================
-// MAIN COMPONENT
-// ============================================================================
-export default function App() {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const ordersRef = useRef<Order[]>([]);
-  const paymentsRef = useRef<PaymentRequest[]>([]);
-  const swapsRef = useRef<SwapOrder[]>([]);
-  const animationRef = useRef<number>(0);
-  const providerRef = useRef<any>(null);
-  const contractsRef = useRef<any>({});
+type PaymentStatus = 'requested' | 'accepted' | 'settled' | 'excluded';
+type Payment = {
+  id: string;
+  sender: string;
+  recipient: string;
+  amount: number;
+  token: string;
+  status: PaymentStatus;
+};
 
-  const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [isAutoTraffic, setIsAutoTraffic] = useState(false);
-  const autoTrafficRef = useRef<any>(null);
-  const [dimensions, setDimensions] = useState({ w: window.innerWidth, h: window.innerHeight });
-  const [orderVersion, setOrderVersion] = useState(0);
-  const [paymentVersion, setPaymentVersion] = useState(0);
-  const [swapVersion, setSwapVersion] = useState(0);
-  const [eventTransport, setEventTransport] = useState<'ws-open' | 'ws-closed' | 'polling' | 'none'>('none');
+type SwapStatus = 'open' | 'matched' | 'settled' | 'excluded';
+type Swap = {
+  id: string;
+  maker: string;
+  sendToken: string;
+  sendAmount: number;
+  receiveToken: string;
+  receiveAmount: number;
+  status: SwapStatus;
+  matchedId?: string;
+};
 
-  // Price clustering for better matching
-  const marketPricesRef = useRef<Set<bigint>>(new Set());
-  const [activeTab, setActiveTab] = useState<'dvp' | 'payments' | 'swaps'>('dvp');
-  const bumpOrdersVersion = useCallback(() => setOrderVersion(v => v + 1), []);
-  const bumpPaymentsVersion = useCallback(() => setPaymentVersion(v => v + 1), []);
-  const bumpSwapsVersion = useCallback(() => setSwapVersion(v => v + 1), []);
+type DvPStatus = 'open' | 'matched' | 'settled' | 'excluded';
+type DvP = {
+  id: string;
+  maker: string;
+  side: 'buy' | 'sell';
+  assetId: number;
+  paymentToken: string;
+  price: number;
+  counterparty?: string;
+  status: DvPStatus;
+  matchedId?: string;
+};
 
-  const lastPolledBlockRef = useRef<number>(0);
-  const seenOrderIdsRef = useRef<Set<string>>(new Set());
-  const seenPaymentIdsRef = useRef<Set<string>>(new Set());
-  const seenSwapIdsRef = useRef<Set<string>>(new Set());
-  const pollIntervalRef = useRef<any>(null);
+type TokenMap = Record<string, number>;
 
-  // --------------------------------------------------------------------------
-  // LOGGING
-  // --------------------------------------------------------------------------
-  const addLog = useCallback((msg: string, type: LogEntry['type'] = 'info') => {
-    setLogs(prev => [
-      { time: new Date().toLocaleTimeString(), msg, type },
-      ...prev
-    ].slice(0, 50));
-  }, []);
+type SettlementReport = {
+  id: string;
+  startedAt: string;
+  rounds: number;
+  participants: string[];
+  excludedUsers: string[];
+  grossOutgoing: Record<string, number>;
+  perTokenNet: Record<string, TokenMap>;
+  netPositions: Record<string, number>;
+  stakeCollected: Record<string, TokenMap>;
+  lockCollected: Record<string, TokenMap>;
+  poolBeforePayout: TokenMap;
+  payouts: Record<string, TokenMap>;
+  stakeRefunds: Record<string, TokenMap>;
+  poolAfterPayout: TokenMap;
+  transactionsSettled: {
+    payments: number;
+    swaps: number;
+    dvps: number;
+  };
+  steps: string[];
+};
 
-  // --------------------------------------------------------------------------
-  // LAYOUT CALCULATION
-  // --------------------------------------------------------------------------
-  const getLayout = useCallback(() => {
-    const graphWidth = dimensions.w - 440; // More space for order panel
-    const graphHeight = dimensions.h;
-    const centerX = graphWidth / 2;
-    const centerY = (graphHeight / 2) - 80; // Move network up to make room for bottom panel
+const TOKENS: Token[] = [
+  { id: 'TKA', symbol: 'TKA', color: '#4cc9f0' },
+  { id: 'TKB', symbol: 'TKB', color: '#f77f00' },
+  { id: 'TKC', symbol: 'TKC', color: '#2a9d8f' },
+  { id: 'TKD', symbol: 'TKD', color: '#b5179e' },
+];
 
-    const users = config.users.map((addr, i) => {
-      const angle = (i / config.users.length) * 2 * Math.PI - Math.PI / 2;
-      return {
-        id: addr.toLowerCase(), // Normalize for consistent comparison
-        name: `User ${i + 1}`,
-        shortAddr: `${addr.slice(0, 6)}...${addr.slice(-4)}`,
-        x: centerX + LAYOUT_RADIUS * Math.cos(angle),
-        y: centerY + LAYOUT_RADIUS * Math.sin(angle),
-      };
-    });
+const DEFAULT_USERS: User[] = Array.from({ length: 5 }).map((_, i) => ({
+  id: `U${i + 1}`,
+  name: `User ${i + 1}`,
+  preferences: ['TKA', 'TKB', 'TKC', 'TKD'],
+  balances: {
+    TKA: 1000,
+    TKB: 1000,
+    TKC: 1000,
+    TKD: 1000,
+  },
+}));
 
-    return { centerX, centerY, users, graphWidth, graphHeight };
-  }, [dimensions]);
+const roundAmount = (value: number) => Math.round(value * 100) / 100;
+const sumTokens = (map: TokenMap) =>
+  Object.values(map).reduce((acc, val) => acc + val, 0);
 
-  // Resolve a user node position; if maker not in config.users, place deterministically
-  const resolveUser = useCallback((users: Array<{ id: string; name: string; shortAddr: string; x: number; y: number }>, userId: string, centerX: number, centerY: number) => {
-    const found = users.find(u => u.id === userId);
-    if (found) return found;
-    // Deterministic hash to position unknown addresses on the ring
-    const addr = userId || '0x0';
-    let hash = 0;
-    for (let i = 0; i < addr.length; i++) {
-      hash = (hash * 31 + addr.charCodeAt(i)) >>> 0;
+const blankTokenMap = () =>
+  TOKENS.reduce((acc, token) => ({ ...acc, [token.id]: 0 }), {} as TokenMap);
+
+const cloneTokenMap = (map: TokenMap) =>
+  Object.keys(map).reduce(
+    (acc, key) => ({ ...acc, [key]: map[key] }),
+    {} as TokenMap
+  );
+
+const createId = (prefix: string) =>
+  `${prefix}-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+
+const clampNonNegative = (value: number) => (value < 0 ? 0 : value);
+
+const collectFromBalances = (
+  balances: TokenMap,
+  amount: number,
+  preferences: string[]
+) => {
+  let remaining = roundAmount(amount);
+  const taken = blankTokenMap();
+
+  const order = [...preferences, ...TOKENS.map(t => t.id)].filter(
+    (value, index, self) => self.indexOf(value) === index
+  );
+
+  for (const tokenId of order) {
+    if (remaining <= 0) break;
+    const available = balances[tokenId] || 0;
+    if (available <= 0) continue;
+    const take = Math.min(available, remaining);
+    balances[tokenId] = roundAmount(available - take);
+    taken[tokenId] = roundAmount(taken[tokenId] + take);
+    remaining = roundAmount(remaining - take);
+  }
+
+  return { taken, ok: remaining <= 0.0001 };
+};
+
+const consumeFromTokenMap = (
+  map: TokenMap,
+  amount: number,
+  preferences: string[]
+) => {
+  let remaining = roundAmount(amount);
+  const order = [...preferences, ...TOKENS.map(t => t.id)].filter(
+    (value, index, self) => self.indexOf(value) === index
+  );
+
+  for (const tokenId of order) {
+    if (remaining <= 0) break;
+    const available = map[tokenId] || 0;
+    if (available <= 0) continue;
+    const take = Math.min(available, remaining);
+    map[tokenId] = roundAmount(available - take);
+    remaining = roundAmount(remaining - take);
+  }
+};
+
+const matchSwaps = (swaps: Swap[]) => {
+  const updated = swaps.map(s => ({ ...s }));
+  for (let i = 0; i < updated.length; i++) {
+    const a = updated[i];
+    if (a.status !== 'open' || a.matchedId) continue;
+    for (let j = i + 1; j < updated.length; j++) {
+      const b = updated[j];
+      if (b.status !== 'open' || b.matchedId) continue;
+      const isMatch =
+        a.sendToken === b.receiveToken &&
+        a.receiveToken === b.sendToken &&
+        roundAmount(a.sendAmount) === roundAmount(b.receiveAmount) &&
+        roundAmount(a.receiveAmount) === roundAmount(b.sendAmount);
+      if (isMatch) {
+        a.status = 'matched';
+        b.status = 'matched';
+        a.matchedId = b.id;
+        b.matchedId = a.id;
+        break;
+      }
     }
-    const angle = (hash % 360) * (Math.PI / 180) - Math.PI / 2;
-    const x = centerX + LAYOUT_RADIUS * Math.cos(angle);
-    const y = centerY + LAYOUT_RADIUS * Math.sin(angle);
-    return {
-      id: userId,
-      name: userId ? `${userId.slice(0, 6)}...${userId.slice(-4)}` : 'Unknown',
-      shortAddr: userId ? `${userId.slice(0, 6)}...${userId.slice(-4)}` : 'Unknown',
-      x,
-      y,
-    };
-  }, []);
+  }
+  return updated;
+};
 
-  // --------------------------------------------------------------------------
-  // CANVAS RENDERING (Pure Canvas - No Library)
-  // --------------------------------------------------------------------------
+const matchDvps = (dvps: DvP[]) => {
+  const updated = dvps.map(d => ({ ...d }));
+  for (let i = 0; i < updated.length; i++) {
+    const a = updated[i];
+    if (a.status !== 'open' || a.matchedId) continue;
+    for (let j = i + 1; j < updated.length; j++) {
+      const b = updated[j];
+      if (b.status !== 'open' || b.matchedId) continue;
+      const sides = a.side !== b.side;
+      const sameAsset = a.assetId === b.assetId;
+      const sameToken = a.paymentToken === b.paymentToken;
+      const samePrice = roundAmount(a.price) === roundAmount(b.price);
+      const counterpartyOk =
+        (!a.counterparty || a.counterparty === b.maker) &&
+        (!b.counterparty || b.counterparty === a.maker);
+      if (sides && sameAsset && sameToken && samePrice && counterpartyOk) {
+        a.status = 'matched';
+        b.status = 'matched';
+        a.matchedId = b.id;
+        b.matchedId = a.id;
+        break;
+      }
+    }
+  }
+  return updated;
+};
 
-  // Helper: Draw rounded rectangle
-  const drawRoundedRect = (ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) => {
-    ctx.beginPath();
-    ctx.moveTo(x + r, y);
-    ctx.lineTo(x + w - r, y);
-    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
-    ctx.lineTo(x + w, y + h - r);
-    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
-    ctx.lineTo(x + r, y + h);
-    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
-    ctx.lineTo(x, y + r);
-    ctx.quadraticCurveTo(x, y, x + r, y);
-    ctx.closePath();
+const runSettlementSimulation = ({
+  users,
+  payments,
+  swaps,
+  dvps,
+  stakeBps,
+}: {
+  users: User[];
+  payments: Payment[];
+  swaps: Swap[];
+  dvps: DvP[];
+  stakeBps: number;
+}) => {
+  const steps: string[] = [];
+  const reportId = createId('cycle');
+  const startedAt = new Date().toLocaleTimeString();
+
+  const usersById = new Map(users.map(u => [u.id, u]));
+  const excludedUsers = new Set<string>();
+
+  let currentPayments = payments.map(p => ({ ...p }));
+  let currentSwaps = matchSwaps(swaps);
+  let currentDvps = matchDvps(dvps);
+
+  let finalBalances = users.map(u => ({
+    ...u,
+    balances: cloneTokenMap(u.balances),
+  }));
+
+  let rounds = 0;
+  let settledPayments = 0;
+  let settledSwaps = 0;
+  let settledDvps = 0;
+
+  const buildActive = () => {
+    const activePayments = currentPayments.filter(
+      p => p.status === 'accepted' && !excludedUsers.has(p.sender) && !excludedUsers.has(p.recipient)
+    );
+    const activeSwaps = currentSwaps.filter(
+      s => s.status === 'matched' && !excludedUsers.has(s.maker)
+    );
+    const activeDvps = currentDvps.filter(
+      d => d.status === 'matched' && !excludedUsers.has(d.maker)
+    );
+    return { activePayments, activeSwaps, activeDvps };
   };
 
-  const render = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+  let lastReport: SettlementReport | null = null;
 
-    const { centerX, centerY, users, graphWidth, graphHeight } = getLayout();
+  while (rounds < 3) {
+    rounds += 1;
+    const { activePayments, activeSwaps, activeDvps } = buildActive();
 
-    // Clear with subtle gradient background
-    const bgGradient = ctx.createRadialGradient(centerX, centerY, 0, centerX, centerY, graphWidth / 2);
-    bgGradient.addColorStop(0, '#151b23');
-    bgGradient.addColorStop(1, COLORS.background);
-    ctx.fillStyle = bgGradient;
-    ctx.fillRect(0, 0, graphWidth, graphHeight);
-
-    // Draw subtle grid pattern
-    ctx.strokeStyle = 'rgba(48, 54, 61, 0.3)';
-    ctx.lineWidth = 1;
-    const gridSize = 40;
-    for (let x = gridSize; x < graphWidth; x += gridSize) {
-      ctx.beginPath();
-      ctx.moveTo(x, 0);
-      ctx.lineTo(x, graphHeight);
-      ctx.stroke();
+    const participants = new Set<string>();
+    for (const payment of activePayments) {
+      participants.add(payment.sender);
+      participants.add(payment.recipient);
     }
-    for (let y = gridSize; y < graphHeight; y += gridSize) {
-      ctx.beginPath();
-      ctx.moveTo(0, y);
-      ctx.lineTo(graphWidth, y);
-      ctx.stroke();
+    for (const swap of activeSwaps) {
+      participants.add(swap.maker);
+    }
+    for (const dvp of activeDvps) {
+      participants.add(dvp.maker);
+      if (dvp.counterparty) participants.add(dvp.counterparty);
     }
 
-    const orders = ordersRef.current;
-    
-    // First pass: Draw match connection lines between matched orders
-    const drawnMatchPairs = new Set<string>();
-    for (const order of orders) {
-      if (!order.matchedWith) continue;
-      
-      const pairKey = [order.id, order.matchedWith].sort().join('-');
-      if (drawnMatchPairs.has(pairKey)) continue;
-      drawnMatchPairs.add(pairKey);
-      
-      const matchedOrder = orders.find(o => o.id === order.matchedWith);
-      if (!matchedOrder) continue;
-      
-      const user1 = users.find(u => u.id === order.userId);
-      const user2 = users.find(u => u.id === matchedOrder.userId);
-      if (!user1 || !user2) continue;
-      
-      // Draw glow for match line
-      ctx.save();
-      ctx.shadowColor = COLORS.match;
-      ctx.shadowBlur = 15;
-      ctx.beginPath();
-      ctx.setLineDash([8, 4]);
-      ctx.moveTo(user1.x, user1.y);
-      ctx.quadraticCurveTo(centerX, centerY, user2.x, user2.y);
-      ctx.strokeStyle = COLORS.match;
-      ctx.lineWidth = 2;
-      ctx.globalAlpha = 0.7;
-      ctx.stroke();
-      ctx.setLineDash([]);
-      ctx.globalAlpha = 1;
-      ctx.restore();
+    if (participants.size === 0) {
+      steps.push('No eligible transactions for this settlement cycle.');
+      break;
     }
 
-    // Second pass: Draw Orders, Payments, and Swaps
-    const drawTransaction = (startX: number, startY: number, endX: number, endY: number, color: string, label: string, status: string, id: number, matched?: boolean) => {
-      // Determine line style based on status
-      let lineColor = color;
-      let lineWidth = 2;
-      let glowColor = color;
-
-      if (matched && status === 'pending') {
-        lineColor = COLORS.match;
-        glowColor = COLORS.match;
-        lineWidth = 3;
-      } else if (status === 'matched' || status === 'fulfilled') {
-        lineColor = COLORS.match;
-        glowColor = COLORS.match;
-        lineWidth = 4;
-      } else if (status === 'settled' || status === 'clearing') {
-        lineColor = 'rgba(0, 255, 0, 0.3)';
-        glowColor = COLORS.match;
-        lineWidth = 5;
-      }
-
-      // Draw line with subtle glow
-      ctx.save();
-      ctx.shadowColor = glowColor;
-      ctx.shadowBlur = 8;
-      ctx.beginPath();
-      ctx.moveTo(startX, startY);
-      ctx.lineTo(endX, endY);
-      ctx.strokeStyle = lineColor;
-      ctx.lineWidth = lineWidth;
-      ctx.lineCap = 'round';
-      ctx.stroke();
-      ctx.restore();
-
-      // Draw Label (at midpoint)
-      const midX = (startX + endX) / 2;
-      const midY = (startY + endY) / 2;
-
-      // Offset labels to avoid overlap
-      const angle = Math.atan2(endY - startY, endX - startX);
-      const labelOffsetX = Math.sin(angle) * 25;
-      const labelOffsetY = -Math.cos(angle) * 25;
-
-      const labelText = (status === 'matched' || status === 'settled')
-        ? '✓ SETTLED'
-        : `${label} #${id}`;
-
-      ctx.font = 'bold 10px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
-      const textMetrics = ctx.measureText(labelText);
-      const labelWidth = textMetrics.width + 14;
-      const labelHeight = 22;
-      const labelX = midX + labelOffsetX - labelWidth / 2;
-      const labelY = midY + labelOffsetY - labelHeight / 2;
-
-      // Label background with rounded corners
-      const labelBorderColor = matched ? COLORS.match : lineColor;
-      ctx.save();
-      ctx.shadowColor = 'rgba(0, 0, 0, 0.5)';
-      ctx.shadowBlur = 6;
-      ctx.shadowOffsetY = 2;
-      drawRoundedRect(ctx, labelX, labelY, labelWidth, labelHeight, 4);
-      ctx.fillStyle = 'rgba(22, 27, 34, 0.95)';
-      ctx.fill();
-      ctx.strokeStyle = labelBorderColor;
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
-      ctx.restore();
-
-      // Label text
-      ctx.fillStyle = labelBorderColor;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(labelText, midX + labelOffsetX, midY + labelOffsetY);
-    };
-
-    // Draw DvP Orders
-    for (const order of orders) {
-      const user = resolveUser(users, order.userId, centerX, centerY);
-      drawTransaction(
-        user.x, user.y, centerX, centerY,
-        order.color,
-        `${order.type} ${order.price}`,
-        order.status,
-        order.orderId,
-        !!order.matchedWith
-      );
-    }
-
-    // Draw Payment Requests
-    for (const payment of currentPayments) {
-      const senderUser = resolveUser(users, payment.sender, centerX, centerY);
-      const recipientUser = resolveUser(users, payment.recipient, centerX, centerY);
-
-      // Draw from sender to recipient, then to clearing house
-      const color = payment.status === 'fulfilled' ? '#0088ff' : '#00ff88';
-
-      if (payment.sender !== ethers.ZeroAddress) {
-        // Draw from sender to clearing house
-        drawTransaction(
-          senderUser.x, senderUser.y, centerX, centerY,
-          color,
-          `PAY ${payment.amount}`,
-          payment.status,
-          payment.paymentId,
-          false
-        );
-      } else {
-        // Open payment request - just to clearing house
-        drawTransaction(
-          recipientUser.x, recipientUser.y, centerX, centerY,
-          color,
-          `REQ ${payment.amount}`,
-          payment.status,
-          payment.paymentId,
-          false
-        );
-      }
-    }
-
-    // Draw Swap Orders
-    for (const swap of currentSwaps) {
-      const makerUser = resolveUser(users, swap.maker, centerX, centerY);
-      const color = swap.matchedOrderId ? COLORS.match : '#ff8800';
-
-      drawTransaction(
-        makerUser.x, makerUser.y, centerX, centerY,
-        color,
-        `SWAP ${swap.sendAmount}`,
-        swap.status,
-        swap.orderId,
-        !!swap.matchedOrderId
-      );
-    }
-
-    // Draw Users (outer nodes)
-    for (const user of users) {
-      const userOrders = orders.filter(o => o.userId === user.id);
-      const hasPendingMatch = userOrders.some(o => o.matchedWith);
-      const hasOrders = userOrders.length > 0;
-      
-      // Outer glow
-      if (hasPendingMatch || hasOrders) {
-        const glowGradient = ctx.createRadialGradient(user.x, user.y, USER_RADIUS, user.x, user.y, USER_RADIUS + (hasPendingMatch ? 18 : 12));
-        glowGradient.addColorStop(0, hasPendingMatch ? 'rgba(0, 255, 0, 0.4)' : 'rgba(76, 201, 240, 0.3)');
-        glowGradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
-        ctx.beginPath();
-        ctx.arc(user.x, user.y, USER_RADIUS + (hasPendingMatch ? 18 : 12), 0, Math.PI * 2);
-        ctx.fillStyle = glowGradient;
-        ctx.fill();
-      }
-
-      // Node with gradient
-      const nodeGradient = ctx.createRadialGradient(user.x - 3, user.y - 3, 0, user.x, user.y, USER_RADIUS);
-      const nodeColor = hasPendingMatch ? COLORS.match : COLORS.user;
-      nodeGradient.addColorStop(0, '#fff');
-      nodeGradient.addColorStop(0.3, nodeColor);
-      nodeGradient.addColorStop(1, nodeColor);
-      
-      ctx.save();
-      ctx.shadowColor = hasPendingMatch ? COLORS.match : COLORS.user;
-      ctx.shadowBlur = 10;
-      ctx.beginPath();
-      ctx.arc(user.x, user.y, USER_RADIUS, 0, Math.PI * 2);
-      ctx.fillStyle = nodeGradient;
-      ctx.fill();
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
-      ctx.lineWidth = 2;
-      ctx.stroke();
-      ctx.restore();
-
-      // Label with background
-      ctx.font = 'bold 11px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
-      const nameWidth = ctx.measureText(user.name).width + 10;
-      drawRoundedRect(ctx, user.x - nameWidth / 2, user.y + USER_RADIUS + 4, nameWidth, 18, 3);
-      ctx.fillStyle = 'rgba(22, 27, 34, 0.8)';
-      ctx.fill();
-      
-      ctx.fillStyle = COLORS.text;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(user.name, user.x, user.y + USER_RADIUS + 13);
-      
-      // Order count badge
-      if (userOrders.length > 0) {
-        const badgeText = `${userOrders.length}`;
-        ctx.font = 'bold 9px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
-        const badgeSize = 14;
-        ctx.beginPath();
-        ctx.arc(user.x + USER_RADIUS - 2, user.y - USER_RADIUS + 2, badgeSize / 2, 0, Math.PI * 2);
-        ctx.fillStyle = hasPendingMatch ? COLORS.match : '#58a6ff';
-        ctx.fill();
-        ctx.fillStyle = '#000';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(badgeText, user.x + USER_RADIUS - 2, user.y - USER_RADIUS + 3);
-      }
-    }
-
-    // Draw Center (Clearing House) - Draw last so it's on top
-    const hasPendingMatches = orders.some(o => o.matchedWith);
-    
-    // Outer ring glow
-    const centerGlowGradient = ctx.createRadialGradient(centerX, centerY, CENTER_RADIUS, centerX, centerY, CENTER_RADIUS + 25);
-    centerGlowGradient.addColorStop(0, hasPendingMatches ? 'rgba(35, 134, 54, 0.5)' : 'rgba(230, 57, 70, 0.3)');
-    centerGlowGradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
-    ctx.beginPath();
-    ctx.arc(centerX, centerY, CENTER_RADIUS + 25, 0, Math.PI * 2);
-    ctx.fillStyle = centerGlowGradient;
-    ctx.fill();
-
-    // Hexagon with gradient
-    ctx.save();
-    ctx.shadowColor = hasPendingMatches ? '#238636' : COLORS.center;
-    ctx.shadowBlur = 20;
-    ctx.beginPath();
-    for (let i = 0; i < 6; i++) {
-      const angle = (Math.PI / 3) * i - Math.PI / 6;
-      const x = centerX + CENTER_RADIUS * Math.cos(angle);
-      const y = centerY + CENTER_RADIUS * Math.sin(angle);
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    }
-    ctx.closePath();
-    
-    const hexGradient = ctx.createLinearGradient(centerX, centerY - CENTER_RADIUS, centerX, centerY + CENTER_RADIUS);
-    const hexColor = hasPendingMatches ? '#238636' : COLORS.center;
-    hexGradient.addColorStop(0, hexColor);
-    hexGradient.addColorStop(1, hasPendingMatches ? '#196c2e' : '#b82e3a');
-    ctx.fillStyle = hexGradient;
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.9)';
-    ctx.lineWidth = 2.5;
-    ctx.stroke();
-    ctx.restore();
-
-    // Center Label
-    ctx.font = 'bold 10px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
-    ctx.fillStyle = '#fff';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText('CLEARING', centerX, centerY - 5);
-    ctx.fillText('HOUSE', centerX, centerY + 7);
-    
-    // Order count below
-    if (orders.length > 0) {
-      ctx.font = '9px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
-      ctx.fillText(`${orders.length} pending`, centerX, centerY + CENTER_RADIUS + 14);
-    }
-  }, [getLayout, resolveUser]);
-
-  // --------------------------------------------------------------------------
-  // ANIMATION LOOP (for UI updates)
-  // --------------------------------------------------------------------------
-  const lastOrderUpdateRef = useRef(0);
-  const animate = useCallback(() => {
-    const now = Date.now();
-
-    render();
-    
-    // Update order version every 500ms to refresh the order panel
-    if (now - lastOrderUpdateRef.current > 500) {
-      lastOrderUpdateRef.current = now;
-      setOrderVersion(v => v + 1);
-    }
-    
-    animationRef.current = requestAnimationFrame(animate);
-  }, [render]);
-
-  // --------------------------------------------------------------------------
-  // START/STOP ANIMATION
-  // --------------------------------------------------------------------------
-  useEffect(() => {
-    animationRef.current = requestAnimationFrame(animate);
-    return () => cancelAnimationFrame(animationRef.current);
-  }, [animate]);
-
-  // --------------------------------------------------------------------------
-  // RESIZE HANDLING
-  // --------------------------------------------------------------------------
-  useEffect(() => {
-    const handleResize = () => setDimensions({ w: window.innerWidth, h: window.innerHeight });
-    window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
-  }, []);
-
-  // --------------------------------------------------------------------------
-  // BLOCKCHAIN CONNECTION
-  // --------------------------------------------------------------------------
-  useEffect(() => {
-    const init = async () => {
-      try {
-        // RPC provider for tx + signer
-        const provider = new ethers.JsonRpcProvider("http://127.0.0.1:8545");
-        providerRef.current = provider;
-        provider.pollingInterval = 1500;
-        const signer = await provider.getSigner();
-
-        // Try WebSocket provider for events; fallback to polling if unavailable
-        let chEventsProvider: any = provider;
-        try {
-          const wsProvider = new ethers.WebSocketProvider("ws://127.0.0.1:8545");
-          // Simple readiness check with timeout; ethers v6 exposes .websocket
-          await (wsProvider.websocket?.readyState === 1
-            ? Promise.resolve()
-            : new Promise((resolve, reject) => {
-                const timer = setTimeout(() => reject(new Error('ws timeout')), 1000);
-                if (wsProvider.websocket) {
-                  wsProvider.websocket.onopen = () => {
-                    clearTimeout(timer);
-                    resolve(null);
-                  };
-                  wsProvider.websocket.onerror = (e: any) => {
-                    clearTimeout(timer);
-                    reject(e);
-                  };
-                } else {
-                  clearTimeout(timer);
-                  reject(new Error('ws not available'));
-                }
-              }));
-          chEventsProvider = wsProvider;
-          setEventTransport('ws-open');
-        } catch {
-          // WebSocket unavailable, using polling for events
-          setEventTransport('polling');
-        }
-
-        const ch = new ethers.Contract(
-          config.addresses.ClearingHouse,
-          config.abis.ClearingHouse,
-          signer
-        );
-        const chEvents = new ethers.Contract(
-          config.addresses.ClearingHouse,
-          config.abis.ClearingHouse,
-          chEventsProvider
-        );
-        contractsRef.current.ClearingHouse = ch;
-        contractsRef.current.ClearingHouseEvents = chEvents;
-
-        // Order Placed Event (via WebSocket provider)
-        chEvents.on("OrderPlaced", (id, maker, asset, tokenId, side, price, counterparty) => {
-          const orderType = side.toString() === "0" ? "BUY" : "SELL";
-          const priceFmt = parseFloat(ethers.formatUnits(price, 18)).toFixed(2);
-          const assetName = `Asset #${tokenId}`;
-          const normalizedMaker = maker.toLowerCase();
-
-          addLog(`Order #${id}: ${maker.slice(0, 6)}... ${orderType} ${assetName} @ ${priceFmt}`, 'info');
-
-          const newOrder: Order = {
-            id: `order-${id}`,
-            orderId: Number(id),
-            userId: normalizedMaker,
-            type: orderType as 'BUY' | 'SELL',
-            asset: assetName,
-            assetAddress: asset.toLowerCase(),
-            tokenId: Number(tokenId),
-            price: priceFmt,
-            priceRaw: BigInt(price.toString()),
-            paymentToken: config.addresses.TokenA.toLowerCase(),
-            counterparty: counterparty ? counterparty.toLowerCase() : '',
-            color: orderType === 'BUY' ? COLORS.buy : COLORS.sell,
-            status: 'pending',
-            createdAt: Date.now(),
-          };
-
-          ordersRef.current = [...ordersRef.current, newOrder];
-          bumpOrdersVersion();
-          checkForMatches(newOrder);
-        });
-
-        // Payment Events
-        chEvents.on("PaymentRequestCreated", (id, recipient, sender, amount) => {
-          const amountFmt = ethers.formatUnits(amount, 18);
-          const senderStr = sender === ethers.ZeroAddress ? 'anyone' : sender.slice(0, 6) + '...';
-
-          addLog(`Payment #${id}: ${senderStr} → ${recipient.slice(0, 6)}... (${amountFmt})`, 'payment');
-
-          const newPayment: PaymentRequest = {
-            id: `payment-${id}`,
-            paymentId: Number(id),
-            recipient: recipient.toLowerCase(),
-            sender: sender.toLowerCase(),
-            amount: amountFmt,
-            amountRaw: BigInt(amount.toString()),
-            status: 'pending',
-            createdAt: Date.now(),
-          };
-
-          paymentsRef.current = [...paymentsRef.current, newPayment];
-          bumpPaymentsVersion();
-        });
-
-        chEvents.on("PaymentRequestFulfilled", (id, sender, token) => {
-          addLog(`Payment #${id} fulfilled by ${sender.slice(0, 6)}... with ${token.slice(0, 6)}...`, 'payment');
-
-          paymentsRef.current = paymentsRef.current.map(p =>
-            p.paymentId === Number(id) ? {
-              ...p,
-              status: 'fulfilled' as const,
-              fulfilledToken: token.toLowerCase()
-            } : p
-          );
-          bumpPaymentsVersion();
-        });
-
-        chEvents.on("PaymentSettled", (id) => {
-          paymentsRef.current = paymentsRef.current.map(p =>
-            p.paymentId === Number(id) ? { ...p, status: 'settled' as const } : p
-          );
-          bumpPaymentsVersion();
-
-          // Remove settled payments after delay
-          setTimeout(() => {
-            paymentsRef.current = paymentsRef.current.filter(p => p.paymentId !== Number(id));
-            bumpPaymentsVersion();
-          }, 3000);
-        });
-
-        // Swap Events
-        chEvents.on("SwapOrderSubmitted", (id, maker, sendAmount, sendToken, receiveAmount) => {
-          const sendAmt = ethers.formatUnits(sendAmount, 18);
-          const recvAmt = ethers.formatUnits(receiveAmount, 18);
-
-          addLog(`Swap #${id}: ${maker.slice(0, 6)}... offers ${sendAmt} ${sendToken.slice(0, 6)}... for ${recvAmt}`, 'swap');
-
-          const newSwap: SwapOrder = {
-            id: `swap-${id}`,
-            orderId: Number(id),
-            maker: maker.toLowerCase(),
-            sendAmount: sendAmt,
-            sendAmountRaw: BigInt(sendAmount.toString()),
-            sendToken: sendToken.toLowerCase(),
-            receiveAmount: recvAmt,
-            receiveAmountRaw: BigInt(receiveAmount.toString()),
-            status: 'pending',
-            createdAt: Date.now(),
-          };
-
-          swapsRef.current = [...swapsRef.current, newSwap];
-          bumpSwapsVersion();
-        });
-
-        chEvents.on("SwapOrderMatched", (id, matchedId) => {
-          addLog(`Swap #${id} ↔ #${matchedId} matched!`, 'match');
-
-          swapsRef.current = swapsRef.current.map(s =>
-            s.orderId === Number(id) ? { ...s, matchedOrderId: Number(matchedId) } : s
-          );
-          bumpSwapsVersion();
-        });
-
-        chEvents.on("SwapSettled", (id) => {
-          swapsRef.current = swapsRef.current.map(s =>
-            s.orderId === Number(id) ? { ...s, status: 'settled' as const } : s
-          );
-          bumpSwapsVersion();
-
-          // Remove settled swaps after delay
-          setTimeout(() => {
-            swapsRef.current = swapsRef.current.filter(s => s.orderId !== Number(id));
-            bumpSwapsVersion();
-          }, 3000);
-        });
-
-        // Settlement Event (via WebSocket provider)
-        chEvents.on("SettlementCompleted", async () => {
-          addLog('Settlement cycle executed!', 'success');
-          await checkMatches();
-          bumpOrdersVersion();
-        });
-
-        addLog('Connected to blockchain.', 'success');
-      } catch {
-        addLog('Failed to connect to blockchain.', 'error');
-      }
-    };
-
-    init();
-
-    return () => {
-      contractsRef.current.ClearingHouse?.removeAllListeners();
-      contractsRef.current.ClearingHouseEvents?.removeAllListeners();
-      stopAutoTraffic();
-    };
-  }, [addLog]);
-
- 
-
-  // --------------------------------------------------------------------------
-  // CHECK FOR POTENTIAL MATCHES (client-side preview)
-  // --------------------------------------------------------------------------
-  const checkForMatches = useCallback((newOrder: Order) => {
-    const orders = ordersRef.current;
-    
-    // Find potential matching order (opposite side, same asset)
-    // Note: We can only check basic compatibility here since sell orders use 
-    // multicurrency terms that are stored on-chain. Actual matching is done by settlement.
-    for (const existingOrder of orders) {
-      if (existingOrder.id === newOrder.id) continue;
-      if (existingOrder.status !== 'pending') continue;
-      if (existingOrder.assetAddress !== newOrder.assetAddress) continue;
-      if (existingOrder.tokenId !== newOrder.tokenId) continue;
-      if (existingOrder.type === newOrder.type) continue; // Must be opposite sides
-      
-      const buyOrder = newOrder.type === 'BUY' ? newOrder : existingOrder;
-      const sellOrder = newOrder.type === 'SELL' ? newOrder : existingOrder;
-
-      // Check for potential matches (frontend visual indicator only)
-      // The contract does the actual price matching, so be more permissive here
-      if (buyOrder.priceRaw > 0n || sellOrder.priceRaw > 0n) {
-        // Check if prices are reasonably close (within 10% for visual indication)
-        const price1 = buyOrder.priceRaw || sellOrder.priceRaw;
-        const price2 = sellOrder.priceRaw || buyOrder.priceRaw;
-        const priceDiff = price1 > price2 ? price1 - price2 : price2 - price1;
-        const percentDiff = Number(priceDiff) / Number(price1);
-
-        if (percentDiff < 0.1) { // Within 10%
-          addLog(`Potential match: #${buyOrder.orderId} ↔ #${sellOrder.orderId} (pending settlement)`, 'match');
-
-          // Mark both as potentially matched (visual indicator)
-          ordersRef.current = ordersRef.current.map(o => {
-            if (o.id === buyOrder.id) return { ...o, matchedWith: sellOrder.id };
-            if (o.id === sellOrder.id) return { ...o, matchedWith: buyOrder.id };
-            return o;
-          });
-          bumpOrdersVersion();
-          break;
-        }
-      }
-    }
-  }, [addLog]);
-
-  // --------------------------------------------------------------------------
-  // CHECK MATCHES (on-chain settlement verification)
-  // --------------------------------------------------------------------------
-  const checkMatches = async () => {
-    const ch = contractsRef.current.ClearingHouse;
-    if (!ch) return;
-
-    const orders = ordersRef.current;
-    const settledIds: string[] = [];
-    const stillActiveIds: string[] = [];
-
-    for (const order of orders) {
-      try {
-        const onChainOrder = await ch.orders(order.orderId);
-        if (!onChainOrder.active) {
-          settledIds.push(order.id);
-        } else {
-          stillActiveIds.push(order.id);
-        }
-      } catch {
-        // Order may not exist on-chain
-      }
-    }
-
-    // Clear matchedWith flag for orders that are still active (didn't actually settle)
-    if (stillActiveIds.length > 0) {
-      ordersRef.current = ordersRef.current.map(o =>
-        stillActiveIds.includes(o.id) ? { ...o, matchedWith: undefined } : o
-      );
-      bumpOrdersVersion();
-    }
-
-    if (settledIds.length > 0) {
-      addLog(`${settledIds.length} orders settled on-chain!`, 'match');
-
-      // Phase 1: Mark as matched (bright green)
-      ordersRef.current = ordersRef.current.map(o =>
-        settledIds.includes(o.id) ? { ...o, status: 'matched' as const, createdAt: Date.now() } : o
-      );
-      bumpOrdersVersion();
-
-      // Phase 2: Mark as clearing (fade out)
-      setTimeout(() => {
-        ordersRef.current = ordersRef.current.map(o =>
-          settledIds.includes(o.id) ? { ...o, status: 'clearing' as const } : o
-        );
-        bumpOrdersVersion();
-      }, 2000);
-
-      // Remove settled order prices from market only if no remaining orders use them
-      const currentOrders = ordersRef.current;
-      const remainingOrders = currentOrders.filter(o => !settledIds.includes(o.id));
-      const remainingPrices = new Set(remainingOrders.map(o => o.priceRaw));
-
-      // Remove prices that are no longer used by any remaining orders
-      for (const price of marketPricesRef.current) {
-        if (!remainingPrices.has(price)) {
-          marketPricesRef.current.delete(price);
-        }
-      }
-
-      // Phase 3: Remove
-      setTimeout(() => {
-        ordersRef.current = ordersRef.current.filter(o => !settledIds.includes(o.id));
-        addLog('Settled orders cleared from view.', 'info');
-        bumpOrdersVersion();
-      }, 3000);
-    } else if (orders.length > 0) {
-      addLog('No orders were matched in this settlement cycle.', 'info');
-    }
-  };
-
-  // --------------------------------------------------------------------------
-  // POLLING FALLBACK FOR EVENTS
-  // --------------------------------------------------------------------------
-  useEffect(() => {
-    // Always run a lightweight poller as a safety net (deduped by seenOrderIdsRef)
-    const provider = providerRef.current;
-    const chAddr = config.addresses.ClearingHouse.toLowerCase();
-    if (!provider || !contractsRef.current.ClearingHouse) return;
-
-    const iface = new ethers.Interface(config.abis.ClearingHouse);
-
-    const ensureStartBlock = async () => {
-      if (lastPolledBlockRef.current === 0) {
-        lastPolledBlockRef.current = await provider.getBlockNumber();
-      }
-    };
-
-    const handleOrderPlaced = (id: bigint, maker: string, asset: string, tokenId: bigint, side: bigint, price: bigint, counterparty: string) => {
-      const orderIdStr = id.toString();
-      if (seenOrderIdsRef.current.has(orderIdStr)) return;
-      seenOrderIdsRef.current.add(orderIdStr);
-
-      const orderType = side.toString() === "0" ? "BUY" : "SELL";
-      const priceFmt = parseFloat(ethers.formatUnits(price, 18)).toFixed(2);
-      const assetName = `Asset #${tokenId}`;
-      const normalizedMaker = maker.toLowerCase();
-
-      addLog(`(poll) Order #${id}: ${maker.slice(0, 6)}... ${orderType} ${assetName} @ ${priceFmt}`, 'info');
-
-      const newOrder: Order = {
-        id: `order-${id}`,
-        orderId: Number(id),
-        userId: normalizedMaker,
-        type: orderType as 'BUY' | 'SELL',
-        asset: assetName,
-        assetAddress: asset.toLowerCase(),
-        tokenId: Number(tokenId),
-        price: priceFmt,
-        priceRaw: BigInt(price.toString()),
-        paymentToken: config.addresses.TokenA.toLowerCase(),
-        counterparty: counterparty ? counterparty.toLowerCase() : '',
-        color: orderType === 'BUY' ? COLORS.buy : COLORS.sell,
-        status: 'pending',
-        createdAt: Date.now(),
-      };
-
-      ordersRef.current = [...ordersRef.current, newOrder];
-      bumpOrdersVersion();
-
-      checkForMatches(newOrder);
-    };
-
-    const handlePaymentRequestCreated = (id: bigint, recipient: string, sender: string, amount: bigint) => {
-      const paymentIdStr = id.toString();
-      if (seenPaymentIdsRef.current.has(paymentIdStr)) return;
-      seenPaymentIdsRef.current.add(paymentIdStr);
-
-      const amountFmt = ethers.formatUnits(amount, 18);
-      const senderStr = sender === ethers.ZeroAddress ? 'anyone' : sender.slice(0, 6) + '...';
-
-      addLog(`(poll) Payment #${id}: ${senderStr} → ${recipient.slice(0, 6)}... (${amountFmt})`, 'payment');
-
-      const newPayment: PaymentRequest = {
-        id: `payment-${id}`,
-        paymentId: Number(id),
-        recipient: recipient.toLowerCase(),
-        sender: sender.toLowerCase(),
-        amount: amountFmt,
-        amountRaw: BigInt(amount.toString()),
-        status: 'pending',
-        createdAt: Date.now(),
-      };
-
-      paymentsRef.current = [...paymentsRef.current, newPayment];
-      bumpPaymentsVersion();
-    };
-
-    const handlePaymentRequestFulfilled = (id: bigint, sender: string, token: string) => {
-      addLog(`(poll) Payment #${id} fulfilled by ${sender.slice(0, 6)}... with ${token.slice(0, 6)}...`, 'payment');
-
-      paymentsRef.current = paymentsRef.current.map(p =>
-        p.paymentId === Number(id) ? {
-          ...p,
-          status: 'fulfilled' as const,
-          fulfilledToken: token.toLowerCase()
-        } : p
-      );
-      bumpPaymentsVersion();
-    };
-
-    const handlePaymentSettled = (id: bigint) => {
-      paymentsRef.current = paymentsRef.current.map(p =>
-        p.paymentId === Number(id) ? { ...p, status: 'settled' as const } : p
-      );
-      bumpPaymentsVersion();
-
-      setTimeout(() => {
-        paymentsRef.current = paymentsRef.current.filter(p => p.paymentId !== Number(id));
-        bumpPaymentsVersion();
-      }, 3000);
-    };
-
-    const handleSwapOrderSubmitted = (id: bigint, maker: string, sendAmount: bigint, sendToken: string, receiveAmount: bigint) => {
-      const swapIdStr = id.toString();
-      if (seenSwapIdsRef.current.has(swapIdStr)) return;
-      seenSwapIdsRef.current.add(swapIdStr);
-
-      const sendAmt = ethers.formatUnits(sendAmount, 18);
-      const recvAmt = ethers.formatUnits(receiveAmount, 18);
-
-      addLog(`(poll) Swap #${id}: ${maker.slice(0, 6)}... offers ${sendAmt} ${sendToken.slice(0, 6)}... for ${recvAmt}`, 'swap');
-
-      const newSwap: SwapOrder = {
-        id: `swap-${id}`,
-        orderId: Number(id),
-        maker: maker.toLowerCase(),
-        sendAmount: sendAmt,
-        sendAmountRaw: BigInt(sendAmount.toString()),
-        sendToken: sendToken.toLowerCase(),
-        receiveAmount: recvAmt,
-        receiveAmountRaw: BigInt(receiveAmount.toString()),
-        status: 'pending',
-        createdAt: Date.now(),
-      };
-
-      swapsRef.current = [...swapsRef.current, newSwap];
-      bumpSwapsVersion();
-    };
-
-    const handleSwapOrderMatched = (id: bigint, matchedId: bigint) => {
-      addLog(`(poll) Swap #${id} ↔ #${matchedId} matched!`, 'match');
-
-      swapsRef.current = swapsRef.current.map(s =>
-        s.orderId === Number(id) ? { ...s, matchedOrderId: Number(matchedId) } : s
-      );
-      bumpSwapsVersion();
-    };
-
-    const handleSwapSettled = (id: bigint) => {
-      swapsRef.current = swapsRef.current.map(s =>
-        s.orderId === Number(id) ? { ...s, status: 'settled' as const } : s
-      );
-      bumpSwapsVersion();
-
-      setTimeout(() => {
-        swapsRef.current = swapsRef.current.filter(s => s.orderId !== Number(id));
-        bumpSwapsVersion();
-      }, 3000);
-    };
-
-    const pollLogs = async () => {
-      try {
-        await ensureStartBlock();
-        const latest = await provider.getBlockNumber();
-        const from = lastPolledBlockRef.current + 1;
-        if (from > latest) return;
-
-        const logs = await provider.getLogs({
-          address: chAddr,
-          fromBlock: from,
-          toBlock: latest,
-        });
-
-        for (const log of logs) {
-          try {
-            const parsed = iface.parseLog(log);
-            if (!parsed) continue;
-            if (parsed.name === 'OrderPlaced') {
-              const [id, maker, asset, tokenId, side, price, counterparty] = parsed.args;
-              handleOrderPlaced(id, maker, asset, tokenId, side, price, counterparty);
-            } else if (parsed.name === 'SettlementCompleted') {
-              addLog('(poll) Settlement cycle executed!', 'success');
-              await checkMatches();
-            } else if (parsed.name === 'PaymentRequestCreated') {
-              const [id, recipient, sender, amount] = parsed.args;
-              handlePaymentRequestCreated(id, recipient, sender, amount);
-            } else if (parsed.name === 'PaymentRequestFulfilled') {
-              const [id, sender, token] = parsed.args;
-              handlePaymentRequestFulfilled(id, sender, token);
-            } else if (parsed.name === 'PaymentSettled') {
-              const [id] = parsed.args;
-              handlePaymentSettled(id);
-            } else if (parsed.name === 'SwapOrderSubmitted') {
-              const [id, maker, sendAmount, sendToken, receiveAmount] = parsed.args;
-              handleSwapOrderSubmitted(id, maker, sendAmount, sendToken, receiveAmount);
-            } else if (parsed.name === 'SwapOrderMatched') {
-              const [id, matchedId] = parsed.args;
-              handleSwapOrderMatched(id, matchedId);
-            } else if (parsed.name === 'SwapSettled') {
-              const [id] = parsed.args;
-              handleSwapSettled(id);
-            }
-          } catch {
-            // Skip unparseable logs
-          }
-        }
-
-        lastPolledBlockRef.current = latest;
-      } catch {
-        // Polling error, will retry
-      }
-    };
-
-    // Immediate poll and start interval
-    pollLogs();
-    pollIntervalRef.current = setInterval(pollLogs, 2000);
-
-    return () => {
-      if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
-      pollIntervalRef.current = null;
-    };
-  }, [eventTransport, addLog, checkForMatches, bumpOrdersVersion]);
-
-  // --------------------------------------------------------------------------
-  // TRAFFIC SIMULATION
-  // --------------------------------------------------------------------------
-  const simulateTraffic = async () => {
-    if (!contractsRef.current.ClearingHouse) {
-      addLog('No contract available', 'error');
-      return;
-    }
-
-    const provider = providerRef.current;
-    const userIndex = Math.floor(Math.random() * config.users.length);
-    const userAddress = config.users[userIndex];
-    const signer = await provider.getSigner(userAddress);
-    const chWithSigner = contractsRef.current.ClearingHouse.connect(signer);
-
-    // Check if there are pending payments that this user can fulfill
-    const pendingPayments = paymentsRef.current.filter(p =>
-      p.status === 'pending' &&
-      (p.sender === ethers.ZeroAddress || // Open request (anyone can fulfill)
-       p.sender === userAddress.toLowerCase()) // Or payment where this user is the sender
+    steps.push(
+      `Round ${rounds}: ${participants.size} participant(s), ${activePayments.length} payment(s), ${activeSwaps.length} swap(s), ${activeDvps.length} DvP order(s).`
     );
 
-    // 20% chance to fulfill a pending payment instead of creating new transactions
-    const shouldFulfillPayment = pendingPayments.length > 0 && Math.random() < 0.2;
+    const balances = new Map(
+      finalBalances.map(u => [u.id, cloneTokenMap(u.balances)])
+    );
 
-    try {
-      let tx;
-      let txType = 'unknown';
+    const grossOutgoing: Record<string, number> = {};
+    const perTokenNet: Record<string, TokenMap> = {};
+    const netPositions: Record<string, number> = {};
+    const stakeCollected: Record<string, TokenMap> = {};
+    const lockCollected: Record<string, TokenMap> = {};
+    const payouts: Record<string, TokenMap> = {};
+    const stakeRefunds: Record<string, TokenMap> = {};
+    const poolBeforePayout = blankTokenMap();
+    const poolAfterPayout = blankTokenMap();
 
-      if (shouldFulfillPayment) {
-        // Fulfill a pending payment (20% chance)
-        const paymentToFulfill = pendingPayments[Math.floor(Math.random() * pendingPayments.length)];
-        const paymentId = paymentToFulfill.paymentId;
+    const ensureUser = (userId: string) => {
+      if (!grossOutgoing[userId]) grossOutgoing[userId] = 0;
+      if (!perTokenNet[userId]) perTokenNet[userId] = blankTokenMap();
+      if (!netPositions[userId]) netPositions[userId] = 0;
+      if (!stakeCollected[userId]) stakeCollected[userId] = blankTokenMap();
+      if (!lockCollected[userId]) lockCollected[userId] = blankTokenMap();
+      if (!payouts[userId]) payouts[userId] = blankTokenMap();
+      if (!stakeRefunds[userId]) stakeRefunds[userId] = blankTokenMap();
+    };
 
-        // Choose a token that the recipient accepts
-        const recipientConfig = await chWithSigner.getUserConfig(paymentToFulfill.recipient);
-        const acceptedTokens = recipientConfig[0]; // acceptedStablecoins array
-        const chosenToken = acceptedTokens[Math.floor(Math.random() * acceptedTokens.length)];
+    for (const userId of participants) ensureUser(userId);
 
-        txType = 'payment fulfillment';
-        tx = await chWithSigner.fulfillPaymentRequest(paymentId, chosenToken);
+    for (const payment of activePayments) {
+      ensureUser(payment.sender);
+      ensureUser(payment.recipient);
+      grossOutgoing[payment.sender] = roundAmount(
+        grossOutgoing[payment.sender] + payment.amount
+      );
+      perTokenNet[payment.sender][payment.token] = roundAmount(
+        perTokenNet[payment.sender][payment.token] - payment.amount
+      );
+      perTokenNet[payment.recipient][payment.token] = roundAmount(
+        perTokenNet[payment.recipient][payment.token] + payment.amount
+      );
+    }
+
+    for (const swap of activeSwaps) {
+      ensureUser(swap.maker);
+      grossOutgoing[swap.maker] = roundAmount(
+        grossOutgoing[swap.maker] + swap.sendAmount
+      );
+      perTokenNet[swap.maker][swap.sendToken] = roundAmount(
+        perTokenNet[swap.maker][swap.sendToken] - swap.sendAmount
+      );
+      perTokenNet[swap.maker][swap.receiveToken] = roundAmount(
+        perTokenNet[swap.maker][swap.receiveToken] + swap.receiveAmount
+      );
+    }
+
+    for (const dvp of activeDvps) {
+      ensureUser(dvp.maker);
+      if (dvp.side === 'buy') {
+        grossOutgoing[dvp.maker] = roundAmount(
+          grossOutgoing[dvp.maker] + dvp.price
+        );
+        perTokenNet[dvp.maker][dvp.paymentToken] = roundAmount(
+          perTokenNet[dvp.maker][dvp.paymentToken] - dvp.price
+        );
       } else {
-        // Create new transactions: 40% DvP, 35% Payments, 25% Swap
-        const transactionType = Math.random();
+        perTokenNet[dvp.maker][dvp.paymentToken] = roundAmount(
+          perTokenNet[dvp.maker][dvp.paymentToken] + dvp.price
+        );
+      }
+    }
 
-        if (transactionType < 0.4) {
-          // DvP Order (40%)
-          const isBuy = Math.random() > 0.5;
-          const assetId = 1 + Math.floor(Math.random() * 3);
+    for (const userId of Object.keys(perTokenNet)) {
+      netPositions[userId] = roundAmount(sumTokens(perTokenNet[userId]));
+    }
 
-          // Price clustering logic for better matching
-          let price;
-          const activePrices = Array.from(marketPricesRef.current);
+    const defaulters: string[] = [];
+    for (const userId of participants) {
+      const user = usersById.get(userId);
+      if (!user) continue;
+      const stake = roundAmount((grossOutgoing[userId] || 0) * (stakeBps / 10000));
+      if (stake <= 0) {
+        steps.push(`Stake: ${user.name} has no gross outgoing; stake skipped.`);
+        continue;
+      }
+      const userBalances = balances.get(userId);
+      if (!userBalances) continue;
+      const { taken, ok } = collectFromBalances(
+        userBalances,
+        stake,
+        user.preferences
+      );
+      stakeCollected[userId] = taken;
+      for (const tokenId of Object.keys(taken)) {
+        poolBeforePayout[tokenId] = roundAmount(
+          poolBeforePayout[tokenId] + taken[tokenId]
+        );
+      }
+      if (!ok) {
+        defaulters.push(userId);
+      }
+    }
 
-          if (activePrices.length > 0 && Math.random() < 0.95) {
-            // 95% chance to pick from existing market prices for clustering
-            // Bias toward prices that are already being used more
-            const currentOrders = ordersRef.current.filter(o => o.status === 'pending');
-            const priceUsage = new Map<bigint, number>();
-            for (const order of currentOrders) {
-              priceUsage.set(order.priceRaw, (priceUsage.get(order.priceRaw) || 0) + 1);
-            }
+    if (defaulters.length > 0) {
+      defaulters.forEach(id => excludedUsers.add(id));
+      steps.push(
+        `Stake failure: excluded ${defaulters
+          .map(id => usersById.get(id)?.name || id)
+          .join(', ')}. Re-netting remaining participants.`
+      );
+      continue;
+    }
 
-            // Weight prices by their current usage (more used = more likely to be picked)
-            const weightedPrices: bigint[] = [];
-            for (const price of activePrices) {
-              const weight = Math.max(1, (priceUsage.get(price) || 0) * 2); // Double weight for each existing order
-              for (let i = 0; i < weight; i++) {
-                weightedPrices.push(price);
-              }
-            }
+    for (const userId of participants) {
+      const net = netPositions[userId] || 0;
+      if (net >= 0) continue;
+      const user = usersById.get(userId);
+      if (!user) continue;
+      const userBalances = balances.get(userId);
+      if (!userBalances) continue;
 
-            price = weightedPrices[Math.floor(Math.random() * weightedPrices.length)];
-            addLog(`Order using clustered price $${ethers.formatUnits(price, 18)} (usage: ${priceUsage.get(price) || 0})`, 'info');
-          } else {
-            // 20% chance to create a new market price
-            price = ethers.parseUnits((100 + Math.floor(Math.random() * 590)).toString(), 18);
-            marketPricesRef.current.add(price);
+      const stakeValue = sumTokens(stakeCollected[userId] || blankTokenMap());
+      let remaining = roundAmount(-net);
+      const stakeUsed = Math.min(remaining, stakeValue);
+      remaining = roundAmount(remaining - stakeUsed);
 
-            // Limit to 10 active prices to prevent unlimited growth
-            if (marketPricesRef.current.size > 10) {
-              const pricesArray = Array.from(marketPricesRef.current);
-              // Remove the oldest price (first in array)
-              marketPricesRef.current.delete(pricesArray[0]);
-            }
-
-            addLog(`Order creating new market price $${ethers.formatUnits(price, 18)}`, 'info');
-          }
-
-          txType = isBuy ? 'BUY order' : 'SELL order';
-
-          if (isBuy) {
-            tx = await chWithSigner.submitBuyOrder(
-              config.addresses.Bond,
-              assetId,
-              config.addresses.TokenA,
-              price,
-              ethers.ZeroAddress
-            );
-          } else {
-            tx = await chWithSigner.submitMulticurrencySellOrder(
-              config.addresses.Bond,
-              assetId,
-              [config.addresses.TokenA],
-              [price],
-              ethers.ZeroAddress
-            );
-          }
-        } else if (transactionType < 0.75) {
-          // Payment Request (35%)
-          const amount = ethers.parseUnits((100 + Math.floor(Math.random() * 500)).toString(), 18);
-          let recipientAddress;
-          do {
-            const recipientIndex = Math.floor(Math.random() * config.users.length);
-            recipientAddress = config.users[recipientIndex];
-          } while (recipientAddress === userAddress); // Don't send to self
-
-          txType = 'payment request';
-
-          tx = await chWithSigner.createPaymentRequest(
-            recipientAddress,
-            amount
+      if (remaining > 0) {
+        const { taken, ok } = collectFromBalances(
+          userBalances,
+          remaining,
+          user.preferences
+        );
+        lockCollected[userId] = taken;
+        for (const tokenId of Object.keys(taken)) {
+          poolBeforePayout[tokenId] = roundAmount(
+            poolBeforePayout[tokenId] + taken[tokenId]
           );
-        } else {
-          // PvP Swap (25%)
-          const sendAmount = ethers.parseUnits((200 + Math.floor(Math.random() * 800)).toString(), 18);
-          const receiveAmount = ethers.parseUnits((180 + Math.floor(Math.random() * 720)).toString(), 18);
-          txType = 'swap order';
-
-          tx = await chWithSigner.submitSwapOrder(
-            sendAmount,
-            config.addresses.TokenA,
-            receiveAmount
-          );
+        }
+        if (!ok) {
+          defaulters.push(userId);
         }
       }
 
-      addLog(`TX sent: ${tx.hash.slice(0, 10)}... (${txType})`, 'info');
-      const receipt = await tx.wait();
-
-      if (receipt.status === 0) {
-        addLog(`TX REVERTED in block ${receipt.blockNumber}`, 'error');
-      } else if (receipt.logs.length === 0) {
-        addLog(`TX mined but no events emitted`, 'error');
-      } else {
-        addLog(`${txType} confirmed in block ${receipt.blockNumber}`, 'success');
+      if (stakeUsed > 0) {
+        const stakeMap = cloneTokenMap(stakeCollected[userId] || blankTokenMap());
+        consumeFromTokenMap(stakeMap, stakeUsed, user.preferences);
+        const remainingStake = stakeMap;
+        stakeRefunds[userId] = remainingStake;
       }
-    } catch (e: any) {
-      addLog(`Transaction failed: ${e.message?.slice(0, 50) || 'unknown error'}`, 'error');
     }
+
+    if (defaulters.length > 0) {
+      defaulters.forEach(id => excludedUsers.add(id));
+      steps.push(
+        `Lock failure: excluded ${defaulters
+          .map(id => usersById.get(id)?.name || id)
+          .join(', ')}. Re-netting remaining participants.`
+      );
+      continue;
+    }
+
+    const pool = cloneTokenMap(poolBeforePayout);
+    for (const userId of participants) {
+      const net = netPositions[userId] || 0;
+      if (net <= 0) continue;
+      const user = usersById.get(userId);
+      if (!user) continue;
+      let remaining = roundAmount(net);
+      const order = [...user.preferences, ...TOKENS.map(t => t.id)].filter(
+        (value, index, self) => self.indexOf(value) === index
+      );
+      for (const tokenId of order) {
+        if (remaining <= 0) break;
+        const available = pool[tokenId] || 0;
+        if (available <= 0) continue;
+        const take = Math.min(available, remaining);
+        pool[tokenId] = roundAmount(available - take);
+        payouts[userId][tokenId] = roundAmount(
+          payouts[userId][tokenId] + take
+        );
+        remaining = roundAmount(remaining - take);
+      }
+    }
+
+    for (const userId of participants) {
+      const user = usersById.get(userId);
+      if (!user) continue;
+      const userBalances = balances.get(userId);
+      if (!userBalances) continue;
+      const refund = stakeRefunds[userId] || blankTokenMap();
+      for (const tokenId of Object.keys(refund)) {
+        const amount = refund[tokenId];
+        if (amount > 0) {
+          userBalances[tokenId] = roundAmount(userBalances[tokenId] + amount);
+          pool[tokenId] = roundAmount(pool[tokenId] - amount);
+        }
+      }
+      const payout = payouts[userId] || blankTokenMap();
+      for (const tokenId of Object.keys(payout)) {
+        const amount = payout[tokenId];
+        if (amount > 0) {
+          userBalances[tokenId] = roundAmount(userBalances[tokenId] + amount);
+        }
+      }
+    }
+
+    for (const tokenId of Object.keys(pool)) {
+      poolAfterPayout[tokenId] = pool[tokenId];
+    }
+
+    const newUsers = finalBalances.map(user => ({
+      ...user,
+      balances: balances.get(user.id) || cloneTokenMap(user.balances),
+    }));
+
+    finalBalances = newUsers;
+
+    currentPayments = currentPayments.map(p => {
+      if (p.status === 'accepted' && !excludedUsers.has(p.sender) && !excludedUsers.has(p.recipient)) {
+        settledPayments += 1;
+        return { ...p, status: 'settled' };
+      }
+      if (excludedUsers.has(p.sender) || excludedUsers.has(p.recipient)) {
+        return { ...p, status: 'excluded' };
+      }
+      return p;
+    });
+
+    currentSwaps = currentSwaps.map(s => {
+      if (s.status === 'matched' && !excludedUsers.has(s.maker)) {
+        settledSwaps += 1;
+        return { ...s, status: 'settled' };
+      }
+      if (excludedUsers.has(s.maker)) {
+        return { ...s, status: 'excluded' };
+      }
+      return s;
+    });
+
+    currentDvps = currentDvps.map(d => {
+      if (d.status === 'matched' && !excludedUsers.has(d.maker)) {
+        settledDvps += 1;
+        return { ...d, status: 'settled' };
+      }
+      if (excludedUsers.has(d.maker)) {
+        return { ...d, status: 'excluded' };
+      }
+      return d;
+    });
+
+    steps.push('Settlement completed and balances updated.');
+    lastReport = {
+      id: reportId,
+      startedAt,
+      rounds,
+      participants: Array.from(participants),
+      excludedUsers: Array.from(excludedUsers),
+      grossOutgoing,
+      perTokenNet,
+      netPositions,
+      stakeCollected,
+      lockCollected,
+      poolBeforePayout,
+      payouts,
+      stakeRefunds,
+      poolAfterPayout,
+      transactionsSettled: {
+        payments: settledPayments,
+        swaps: settledSwaps,
+        dvps: settledDvps,
+      },
+      steps,
+    };
+    break;
+  }
+
+  if (!lastReport) {
+    lastReport = {
+      id: reportId,
+      startedAt,
+      rounds,
+      participants: [],
+      excludedUsers: Array.from(excludedUsers),
+      grossOutgoing: {},
+      perTokenNet: {},
+      netPositions: {},
+      stakeCollected: {},
+      lockCollected: {},
+      poolBeforePayout: blankTokenMap(),
+      payouts: {},
+      stakeRefunds: {},
+      poolAfterPayout: blankTokenMap(),
+      transactionsSettled: { payments: 0, swaps: 0, dvps: 0 },
+      steps,
+    };
+  }
+
+  return {
+    users: finalBalances,
+    payments: currentPayments,
+    swaps: currentSwaps,
+    dvps: currentDvps,
+    report: lastReport,
+  };
+};
+
+export default function App() {
+  const [users, setUsers] = useState<User[]>(DEFAULT_USERS);
+  const [payments, setPayments] = useState<Payment[]>([]);
+  const [swaps, setSwaps] = useState<Swap[]>([]);
+  const [dvps, setDvps] = useState<DvP[]>([]);
+  const [reports, setReports] = useState<SettlementReport[]>([]);
+  const [stakeBps, setStakeBps] = useState(2000);
+  const [autoMode, setAutoMode] = useState(false);
+
+  const stateRef = useRef({ users, payments, swaps, dvps });
+  useEffect(() => {
+    stateRef.current = { users, payments, swaps, dvps };
+  }, [users, payments, swaps, dvps]);
+
+  const [newPayment, setNewPayment] = useState({
+    sender: 'U1',
+    recipient: 'U2',
+    amount: 50,
+    token: 'TKA',
+  });
+  const [newSwap, setNewSwap] = useState({
+    maker: 'U1',
+    sendToken: 'TKA',
+    sendAmount: 40,
+    receiveToken: 'TKB',
+    receiveAmount: 38,
+  });
+  const [newDvP, setNewDvP] = useState({
+    maker: 'U1',
+    side: 'sell' as 'sell' | 'buy',
+    assetId: 1,
+    paymentToken: 'TKA',
+    price: 120,
+    counterparty: '',
+  });
+
+  const addPayment = useCallback(() => {
+    const payment: Payment = {
+      id: createId('pay'),
+      sender: newPayment.sender,
+      recipient: newPayment.recipient,
+      amount: roundAmount(newPayment.amount),
+      token: newPayment.token,
+      status: 'requested',
+    };
+    setPayments(prev => [payment, ...prev]);
+  }, [newPayment]);
+
+  const addSwap = useCallback(() => {
+    const swap: Swap = {
+      id: createId('swap'),
+      maker: newSwap.maker,
+      sendToken: newSwap.sendToken,
+      sendAmount: roundAmount(newSwap.sendAmount),
+      receiveToken: newSwap.receiveToken,
+      receiveAmount: roundAmount(newSwap.receiveAmount),
+      status: 'open',
+    };
+    setSwaps(prev => [swap, ...prev]);
+  }, [newSwap]);
+
+  const addDvP = useCallback(() => {
+    const order: DvP = {
+      id: createId('dvp'),
+      maker: newDvP.maker,
+      side: newDvP.side,
+      assetId: newDvP.assetId,
+      paymentToken: newDvP.paymentToken,
+      price: roundAmount(newDvP.price),
+      counterparty: newDvP.counterparty || undefined,
+      status: 'open',
+    };
+    setDvps(prev => [order, ...prev]);
+  }, [newDvP]);
+
+  const acceptPayment = (id: string) => {
+    setPayments(prev =>
+      prev.map(p => (p.id === id ? { ...p, status: 'accepted' } : p))
+    );
   };
 
-  const toggleAutoTraffic = () => {
-    if (isAutoTraffic) {
-      stopAutoTraffic();
-      addLog('Auto-traffic stopped.', 'info');
+  const acceptAllPayments = () => {
+    setPayments(prev =>
+      prev.map(p => (p.status === 'requested' ? { ...p, status: 'accepted' } : p))
+    );
+  };
+
+  const runSettlement = useCallback(() => {
+    const result = runSettlementSimulation({
+      users: stateRef.current.users,
+      payments: stateRef.current.payments,
+      swaps: stateRef.current.swaps,
+      dvps: stateRef.current.dvps,
+      stakeBps,
+    });
+    setUsers(result.users);
+    setPayments(result.payments);
+    setSwaps(result.swaps);
+    setDvps(result.dvps);
+    setReports(prev => [result.report, ...prev].slice(0, 5));
+  }, [stakeBps]);
+
+  const clearSettled = () => {
+    setPayments(prev => prev.filter(p => p.status !== 'settled'));
+    setSwaps(prev => prev.filter(s => s.status !== 'settled'));
+    setDvps(prev => prev.filter(d => d.status !== 'settled'));
+  };
+
+  const resetScenario = () => {
+    setUsers(DEFAULT_USERS);
+    setPayments([]);
+    setSwaps([]);
+    setDvps([]);
+    setReports([]);
+  };
+
+  const updatePreference = (userId: string, tokenId: string, direction: 'up' | 'down') => {
+    setUsers(prev =>
+      prev.map(user => {
+        if (user.id !== userId) return user;
+        const idx = user.preferences.indexOf(tokenId);
+        if (idx === -1) return user;
+        const swapIdx = direction === 'up' ? idx - 1 : idx + 1;
+        if (swapIdx < 0 || swapIdx >= user.preferences.length) return user;
+        const next = [...user.preferences];
+        [next[idx], next[swapIdx]] = [next[swapIdx], next[idx]];
+        return { ...user, preferences: next };
+      })
+    );
+  };
+
+  const applyScenario = (scenario: 'mixed' | 'multi-token' | 'defaulter') => {
+    const baseUsers = DEFAULT_USERS.map(u => ({
+      ...u,
+      balances: cloneTokenMap(u.balances),
+    }));
+    if (scenario === 'defaulter') {
+      baseUsers[0].balances.TKA = 30;
+    }
+    setUsers(baseUsers);
+
+    if (scenario === 'mixed') {
+      setPayments([
+        {
+          id: createId('pay'),
+          sender: 'U1',
+          recipient: 'U2',
+          amount: 10,
+          token: 'TKB',
+          status: 'accepted',
+        },
+        {
+          id: createId('pay'),
+          sender: 'U3',
+          recipient: 'U4',
+          amount: 7,
+          token: 'TKC',
+          status: 'accepted',
+        },
+      ]);
+      setSwaps([
+        {
+          id: createId('swap'),
+          maker: 'U1',
+          sendToken: 'TKA',
+          sendAmount: 5,
+          receiveToken: 'TKB',
+          receiveAmount: 6,
+          status: 'open',
+        },
+        {
+          id: createId('swap'),
+          maker: 'U3',
+          sendToken: 'TKB',
+          sendAmount: 6,
+          receiveToken: 'TKA',
+          receiveAmount: 5,
+          status: 'open',
+        },
+      ]);
+      setDvps([
+        {
+          id: createId('dvp'),
+          maker: 'U1',
+          side: 'sell',
+          assetId: 1,
+          paymentToken: 'TKB',
+          price: 12,
+          counterparty: 'U3',
+          status: 'open',
+        },
+        {
+          id: createId('dvp'),
+          maker: 'U3',
+          side: 'buy',
+          assetId: 1,
+          paymentToken: 'TKB',
+          price: 12,
+          counterparty: 'U1',
+          status: 'open',
+        },
+      ]);
+    } else if (scenario === 'multi-token') {
+      setPayments([
+        {
+          id: createId('pay'),
+          sender: 'U1',
+          recipient: 'U2',
+          amount: 8,
+          token: 'TKB',
+          status: 'accepted',
+        },
+        {
+          id: createId('pay'),
+          sender: 'U3',
+          recipient: 'U4',
+          amount: 5,
+          token: 'TKC',
+          status: 'accepted',
+        },
+        {
+          id: createId('pay'),
+          sender: 'U5',
+          recipient: 'U2',
+          amount: 4,
+          token: 'TKA',
+          status: 'accepted',
+        },
+      ]);
+      setSwaps([
+        {
+          id: createId('swap'),
+          maker: 'U1',
+          sendToken: 'TKA',
+          sendAmount: 3,
+          receiveToken: 'TKB',
+          receiveAmount: 4,
+          status: 'open',
+        },
+        {
+          id: createId('swap'),
+          maker: 'U5',
+          sendToken: 'TKB',
+          sendAmount: 4,
+          receiveToken: 'TKA',
+          receiveAmount: 3,
+          status: 'open',
+        },
+        {
+          id: createId('swap'),
+          maker: 'U4',
+          sendToken: 'TKC',
+          sendAmount: 2,
+          receiveToken: 'TKA',
+          receiveAmount: 2,
+          status: 'open',
+        },
+        {
+          id: createId('swap'),
+          maker: 'U2',
+          sendToken: 'TKA',
+          sendAmount: 2,
+          receiveToken: 'TKC',
+          receiveAmount: 2,
+          status: 'open',
+        },
+      ]);
+      setDvps([
+        {
+          id: createId('dvp'),
+          maker: 'U1',
+          side: 'sell',
+          assetId: 1,
+          paymentToken: 'TKC',
+          price: 9,
+          counterparty: 'U3',
+          status: 'open',
+        },
+        {
+          id: createId('dvp'),
+          maker: 'U3',
+          side: 'buy',
+          assetId: 1,
+          paymentToken: 'TKC',
+          price: 9,
+          counterparty: 'U1',
+          status: 'open',
+        },
+      ]);
     } else {
-      setIsAutoTraffic(true);
-      addLog('Auto-traffic started.', 'info');
-      simulateTraffic();
-      autoTrafficRef.current = setInterval(simulateTraffic, 2000);
+      setPayments([
+        {
+          id: createId('pay'),
+          sender: 'U1',
+          recipient: 'U2',
+          amount: 20,
+          token: 'TKA',
+          status: 'accepted',
+        },
+        {
+          id: createId('pay'),
+          sender: 'U3',
+          recipient: 'U4',
+          amount: 6,
+          token: 'TKA',
+          status: 'accepted',
+        },
+      ]);
+      setSwaps([]);
+      setDvps([]);
+    }
+    setReports([]);
+  };
+
+  const addRandomTransaction = () => {
+    const userIds = users.map(u => u.id);
+    const pick = () => userIds[Math.floor(Math.random() * userIds.length)];
+    const tokenPick = () => TOKENS[Math.floor(Math.random() * TOKENS.length)].id;
+    const type = Math.random();
+
+    if (type < 0.35) {
+      let sender = pick();
+      let recipient = pick();
+      while (recipient === sender) recipient = pick();
+      setPayments(prev => [
+        {
+          id: createId('pay'),
+          sender,
+          recipient,
+          amount: roundAmount(5 + Math.random() * 20),
+          token: tokenPick(),
+          status: 'accepted',
+        },
+        ...prev,
+      ]);
+    } else if (type < 0.7) {
+      const maker = pick();
+      const sendToken = tokenPick();
+      const receiveToken = tokenPick();
+      const sendAmount = roundAmount(4 + Math.random() * 12);
+      const receiveAmount = roundAmount(sendAmount * (0.9 + Math.random() * 0.2));
+      setSwaps(prev => [
+        {
+          id: createId('swap'),
+          maker,
+          sendToken,
+          sendAmount,
+          receiveToken,
+          receiveAmount,
+          status: 'open',
+        },
+        ...prev,
+      ]);
+    } else {
+      const maker = pick();
+      const side = Math.random() > 0.5 ? 'buy' : 'sell';
+      const assetId = 1 + Math.floor(Math.random() * 3);
+      setDvps(prev => [
+        {
+          id: createId('dvp'),
+          maker,
+          side,
+          assetId,
+          paymentToken: tokenPick(),
+          price: roundAmount(10 + Math.random() * 40),
+          status: 'open',
+        },
+        ...prev,
+      ]);
     }
   };
 
-  const stopAutoTraffic = () => {
-    if (autoTrafficRef.current) clearInterval(autoTrafficRef.current);
-    autoTrafficRef.current = null;
-    setIsAutoTraffic(false);
-  };
+  useEffect(() => {
+    if (!autoMode) return;
+    const txTimer = setInterval(addRandomTransaction, 1500);
+    const settleTimer = setInterval(runSettlement, 7000);
+    return () => {
+      clearInterval(txTimer);
+      clearInterval(settleTimer);
+    };
+  }, [autoMode, runSettlement, users]);
 
-  const triggerSettlement = async () => {
-    try {
-      await providerRef.current.send("evm_increaseTime", [301]);
-      await providerRef.current.send("evm_mine", []);
-      const tx = await contractsRef.current.ClearingHouse.performSettlement();
-      addLog('Settlement initiated...', 'info');
-      await tx.wait();
-      addLog('Settlement complete, verifying orders...', 'info');
-      // Explicitly check matches after settlement (don't rely solely on event)
-      await checkMatches();
-    } catch {
-      addLog('Settlement failed.', 'error');
-    }
-  };
-
-  // --------------------------------------------------------------------------
-  // RENDER UI
-  // --------------------------------------------------------------------------
-  const graphWidth = dimensions.w - 440; // Left sidebar + right panel
-  const graphHeight = dimensions.h;
-  // Trigger re-renders when data changes
-  void orderVersion;
-  void paymentVersion;
-  void swapVersion;
-  const currentOrders = [...ordersRef.current]; // Snapshot for rendering
-  const currentPayments = [...paymentsRef.current]; // Snapshot for rendering
-  const currentSwaps = [...swapsRef.current]; // Snapshot for rendering
-
-  // Connection status indicator
-  const connectionStatus = eventTransport === 'ws-open' ? 'WebSocket' : eventTransport === 'polling' ? 'Polling' : 'Connecting...';
-  const connectionColor = eventTransport === 'ws-open' ? '#3fb950' : eventTransport === 'polling' ? '#d29922' : '#8b949e';
+  const latestReport = reports[0];
 
   return (
-    <div style={{ display: 'flex', height: '100vh', background: COLORS.background, color: COLORS.text, fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif' }}>
-      
-      {/* Left Sidebar - Controls */}
-      <div style={{
-        width: 260,
-        padding: 20,
-        background: `linear-gradient(180deg, ${COLORS.panelBg} 0%, #0d1117 100%)`,
-        borderRight: `1px solid ${COLORS.panelBorder}`,
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 20,
-        overflowY: 'auto',
-      }}>
-        {/* Header */}
-        <div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <div style={{ 
-              width: 32, 
-              height: 32, 
-              background: 'linear-gradient(135deg, #e63946 0%, #b82e3a 100%)', 
-              borderRadius: 8,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              fontSize: 16,
-            }}>⬡</div>
-            <h1 style={{ margin: 0, fontSize: 20, color: '#fff', fontWeight: 600 }}>ClearingHouse</h1>
-          </div>
-          <p style={{ margin: '8px 0 0', color: COLORS.textMuted, fontSize: 12 }}>
-            Real-time Settlement Visualization
-          </p>
-          {/* Connection Status */}
-          <div style={{ 
-            marginTop: 10, 
-            display: 'flex', 
-            alignItems: 'center', 
-            gap: 6,
-            fontSize: 11,
-            color: connectionColor,
-          }}>
-            <span style={{ 
-              width: 6, 
-              height: 6, 
-              borderRadius: '50%', 
-              background: connectionColor,
-              boxShadow: `0 0 6px ${connectionColor}`,
-            }} />
-            {connectionStatus}
-          </div>
-        </div>
+    <div className="app">
+      <aside className="panel sidebar">
+        <h1>ClearingHouse Demo</h1>
+        <p className="muted">
+          Client-side simulation of payments, swaps, and DvP settlement with
+          ranked stablecoin preferences.
+        </p>
 
-        {/* Controls Section */}
-        <div>
-          <h3 style={{ margin: '0 0 12px', fontSize: 11, color: COLORS.textMuted, textTransform: 'uppercase', letterSpacing: '0.5px' }}>Controls</h3>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <Button onClick={simulateTraffic}>+ Create Order</Button>
-            <Button 
-              onClick={toggleAutoTraffic} 
-              style={{ background: isAutoTraffic ? '#da3633' : '#1f6feb' }}
+        <section>
+          <h2>Scenario Presets</h2>
+          <div className="button-row">
+            <button onClick={() => applyScenario('mixed')}>Mixed Batch</button>
+            <button onClick={() => applyScenario('multi-token')}>Multi-Token</button>
+            <button onClick={() => applyScenario('defaulter')}>Defaulter</button>
+          </div>
+          <div className="button-row">
+            <button onClick={resetScenario} className="ghost">Reset</button>
+          </div>
+        </section>
+
+        <section>
+          <h2>Settlement Controls</h2>
+          <label className="input-row">
+            <span>Stake BPS</span>
+            <input
+              type="number"
+              min={0}
+              max={10000}
+              step={100}
+              value={stakeBps}
+              onChange={e => setStakeBps(Number(e.target.value))}
+            />
+          </label>
+          <div className="button-row">
+            <button onClick={runSettlement} className="primary">Run Settlement</button>
+            <button onClick={clearSettled} className="ghost">Clear Settled</button>
+          </div>
+          <div className="button-row">
+            <button onClick={() => setAutoMode(v => !v)} className={autoMode ? 'danger' : ''}>
+              {autoMode ? 'Stop Auto-Run' : 'Start Auto-Run'}
+            </button>
+          </div>
+        </section>
+
+        <section>
+          <h2>Payments</h2>
+          <div className="form-grid">
+            <select
+              value={newPayment.sender}
+              onChange={e => setNewPayment(p => ({ ...p, sender: e.target.value }))}
             >
-              {isAutoTraffic ? '■ Stop Traffic' : '▶ Auto-Traffic'}
-            </Button>
-            <Button onClick={triggerSettlement} style={{ background: '#238636' }}>
-              ⟳ Settle Orders
-            </Button>
+              {users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
+            </select>
+            <select
+              value={newPayment.recipient}
+              onChange={e => setNewPayment(p => ({ ...p, recipient: e.target.value }))}
+            >
+              {users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
+            </select>
+            <input
+              type="number"
+              min={1}
+              value={newPayment.amount}
+              onChange={e => setNewPayment(p => ({ ...p, amount: Number(e.target.value) }))}
+            />
+            <select
+              value={newPayment.token}
+              onChange={e => setNewPayment(p => ({ ...p, token: e.target.value }))}
+            >
+              {TOKENS.map(t => <option key={t.id} value={t.id}>{t.symbol}</option>)}
+            </select>
           </div>
-        </div>
+          <div className="button-row">
+            <button onClick={addPayment}>Add Payment</button>
+            <button onClick={acceptAllPayments} className="ghost">Accept All</button>
+          </div>
+        </section>
 
-        {/* Transaction Type Tabs */}
-        <div style={{ display: 'flex', gap: 4, marginBottom: 16 }}>
-          <TabButton active={activeTab === 'dvp'} onClick={() => setActiveTab('dvp')}>
-            DvP Orders
-          </TabButton>
-          <TabButton active={activeTab === 'payments'} onClick={() => setActiveTab('payments')}>
-            Payments
-          </TabButton>
-          <TabButton active={activeTab === 'swaps'} onClick={() => setActiveTab('swaps')}>
-            PvP Swaps
-          </TabButton>
-        </div>
+        <section>
+          <h2>Swaps</h2>
+          <div className="form-grid">
+            <select
+              value={newSwap.maker}
+              onChange={e => setNewSwap(s => ({ ...s, maker: e.target.value }))}
+            >
+              {users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
+            </select>
+            <select
+              value={newSwap.sendToken}
+              onChange={e => setNewSwap(s => ({ ...s, sendToken: e.target.value }))}
+            >
+              {TOKENS.map(t => <option key={t.id} value={t.id}>{t.symbol}</option>)}
+            </select>
+            <input
+              type="number"
+              min={1}
+              value={newSwap.sendAmount}
+              onChange={e => setNewSwap(s => ({ ...s, sendAmount: Number(e.target.value) }))}
+            />
+            <select
+              value={newSwap.receiveToken}
+              onChange={e => setNewSwap(s => ({ ...s, receiveToken: e.target.value }))}
+            >
+              {TOKENS.map(t => <option key={t.id} value={t.id}>{t.symbol}</option>)}
+            </select>
+            <input
+              type="number"
+              min={1}
+              value={newSwap.receiveAmount}
+              onChange={e => setNewSwap(s => ({ ...s, receiveAmount: Number(e.target.value) }))}
+            />
+          </div>
+          <div className="button-row">
+            <button onClick={addSwap}>Add Swap</button>
+          </div>
+        </section>
 
-        {/* Legend */}
-        <div style={{ background: 'rgba(13, 17, 23, 0.6)', padding: 14, borderRadius: 8, border: `1px solid ${COLORS.panelBorder}` }}>
-          <h3 style={{ margin: '0 0 12px', fontSize: 11, color: COLORS.textMuted, textTransform: 'uppercase', letterSpacing: '0.5px' }}>Legend</h3>
-          <LegendItem color={COLORS.center} label="Clearing House" />
-          <LegendItem color={COLORS.user} label="Participant" />
-          {activeTab === 'dvp' && (
-            <>
-              <LegendItem color={COLORS.buy} label="Buy Order" isLine />
-              <LegendItem color={COLORS.sell} label="Sell Order" isLine />
-              <LegendItem color={COLORS.match} label="Matched" isLine />
-            </>
-          )}
-          {activeTab === 'payments' && (
-            <>
-              <LegendItem color="#00ff88" label="Payment Request" isLine />
-              <LegendItem color="#0088ff" label="Fulfilled" isLine />
-            </>
-          )}
-          {activeTab === 'swaps' && (
-            <>
-              <LegendItem color="#ff8800" label="Swap Order" isLine />
-              <LegendItem color={COLORS.match} label="Matched" isLine />
-            </>
-          )}
-        </div>
+        <section>
+          <h2>DvP Orders</h2>
+          <div className="form-grid">
+            <select
+              value={newDvP.maker}
+              onChange={e => setNewDvP(s => ({ ...s, maker: e.target.value }))}
+            >
+              {users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
+            </select>
+            <select
+              value={newDvP.side}
+              onChange={e =>
+                setNewDvP(s => ({ ...s, side: e.target.value as 'buy' | 'sell' }))
+              }
+            >
+              <option value="buy">Buy</option>
+              <option value="sell">Sell</option>
+            </select>
+            <input
+              type="number"
+              min={1}
+              value={newDvP.assetId}
+              onChange={e => setNewDvP(s => ({ ...s, assetId: Number(e.target.value) }))}
+            />
+            <select
+              value={newDvP.paymentToken}
+              onChange={e => setNewDvP(s => ({ ...s, paymentToken: e.target.value }))}
+            >
+              {TOKENS.map(t => <option key={t.id} value={t.id}>{t.symbol}</option>)}
+            </select>
+            <input
+              type="number"
+              min={1}
+              value={newDvP.price}
+              onChange={e => setNewDvP(s => ({ ...s, price: Number(e.target.value) }))}
+            />
+            <select
+              value={newDvP.counterparty}
+              onChange={e => setNewDvP(s => ({ ...s, counterparty: e.target.value }))}
+            >
+              <option value="">Any counterparty</option>
+              {users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
+            </select>
+          </div>
+          <div className="button-row">
+            <button onClick={addDvP}>Add DvP</button>
+          </div>
+        </section>
 
-        {/* Activity Log */}
-        <div style={{ flex: 1, minHeight: 120, display: 'flex', flexDirection: 'column' }}>
-          <h3 style={{ margin: '0 0 12px', fontSize: 11, color: COLORS.textMuted, textTransform: 'uppercase', letterSpacing: '0.5px' }}>Activity Log</h3>
-          <div style={{
-            flex: 1,
-            background: 'rgba(13, 17, 23, 0.6)',
-            border: `1px solid ${COLORS.panelBorder}`,
-            borderRadius: 8,
-            padding: 10,
-            overflowY: 'auto',
-            maxHeight: 220,
-          }}>
-            {logs.length === 0 && (
-              <div style={{ color: COLORS.textMuted, fontSize: 11, fontStyle: 'italic' }}>Waiting for activity...</div>
-            )}
-            {logs.map((log, i) => (
-              <div
-                key={i}
-                style={{
-                  fontSize: 10,
-                  padding: '4px 0',
-                  borderBottom: i < logs.length - 1 ? `1px solid rgba(48, 54, 61, 0.5)` : 'none',
-                  color: log.type === 'match' ? COLORS.match : log.type === 'error' ? '#f85149' : log.type === 'success' ? '#3fb950' : COLORS.text,
-                }}
-              >
-                <span style={{ color: COLORS.textMuted, marginRight: 4, fontSize: 9 }}>{log.time}</span>
-                {log.msg}
+        <section>
+          <h2>Users & Preferences</h2>
+          <div className="user-list">
+            {users.map(user => (
+              <div key={user.id} className="user-card">
+                <div className="user-title">{user.name}</div>
+                <div className="token-grid">
+                  {TOKENS.map(token => (
+                    <div key={token.id} className="token-chip">
+                      <span style={{ color: token.color }}>{token.symbol}</span>
+                      <span>{user.balances[token.id].toFixed(2)}</span>
+                    </div>
+                  ))}
+                </div>
+                <div className="pref-list">
+                  {user.preferences.map((pref, idx) => (
+                    <div key={`${user.id}-${pref}`} className="pref-row">
+                      <span>{idx + 1}. {pref}</span>
+                      <div className="pref-actions">
+                        <button
+                          onClick={() => updatePreference(user.id, pref, 'up')}
+                          disabled={idx === 0}
+                        >
+                          Up
+                        </button>
+                        <button
+                          onClick={() => updatePreference(user.id, pref, 'down')}
+                          disabled={idx === user.preferences.length - 1}
+                        >
+                          Down
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
               </div>
             ))}
           </div>
-        </div>
-      </div>
+        </section>
+      </aside>
 
-      {/* Canvas */}
-      <canvas
-        ref={canvasRef}
-        width={graphWidth}
-        height={graphHeight}
-        style={{ display: 'block', flex: 1 }}
-      />
-
-      {/* Right Panel - Transaction Details */}
-      <div style={{
-        width: 190,
-        padding: 16,
-        background: `linear-gradient(180deg, ${COLORS.panelBg} 0%, #0d1117 100%)`,
-        borderLeft: `1px solid ${COLORS.panelBorder}`,
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 16,
-        overflowY: 'auto',
-      }}>
-        {/* Header */}
-        <div style={{
-          paddingBottom: 12,
-          borderBottom: `1px solid ${COLORS.panelBorder}`,
-        }}>
-          <h2 style={{ margin: 0, fontSize: 14, color: '#fff', fontWeight: 600 }}>
-            {activeTab === 'dvp' && 'DvP Order Book'}
-            {activeTab === 'payments' && 'Payment Requests'}
-            {activeTab === 'swaps' && 'PvP Swap Orders'}
-          </h2>
-          <div style={{
-            marginTop: 6,
-            display: 'flex',
-            alignItems: 'center',
-            gap: 8,
-          }}>
-            <span style={{
-              fontSize: 18,
-              fontWeight: 700,
-              color: (
-                (activeTab === 'dvp' && currentOrders.length > 0) ||
-                (activeTab === 'payments' && currentPayments.length > 0) ||
-                (activeTab === 'swaps' && currentSwaps.length > 0)
-              ) ? '#58a6ff' : COLORS.textMuted,
-            }}>
-              {activeTab === 'dvp' && currentOrders.length}
-              {activeTab === 'payments' && currentPayments.length}
-              {activeTab === 'swaps' && currentSwaps.length}
-            </span>
-            <span style={{ fontSize: 11, color: COLORS.textMuted }}>
-              active transaction{(currentOrders.length + currentPayments.length + currentSwaps.length) !== 1 ? 's' : ''}
-            </span>
+      <main className="main">
+        <section className="panel graph-panel">
+          <h2>Flow Graph</h2>
+          <FlowGraph
+            users={users}
+            payments={payments}
+            swaps={swaps}
+            dvps={dvps}
+          />
+          <div className="legend">
+            {TOKENS.map(token => (
+              <div key={token.id} className="legend-item">
+                <span className="legend-color" style={{ background: token.color }} />
+                {token.symbol}
+              </div>
+            ))}
           </div>
-        </div>
+        </section>
 
-        {/* DvP Orders Tab */}
-        {activeTab === 'dvp' && (
-          <>
-            {/* Buy Orders */}
+        <section className="panel transactions">
+          <h2>Transactions</h2>
+          <div className="transaction-grid">
             <div>
-              <h3 style={{
-                margin: '0 0 8px',
-                fontSize: 10,
-                color: COLORS.buy,
-                display: 'flex',
-                alignItems: 'center',
-                gap: 6,
-                textTransform: 'uppercase',
-                letterSpacing: '0.5px',
-                fontWeight: 600,
-              }}>
-                <span style={{ width: 8, height: 8, background: COLORS.buy, borderRadius: 2 }} />
-                BUY ({currentOrders.filter(o => o.type === 'BUY' && o.status === 'pending').length})
-              </h3>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                {currentOrders.filter(o => o.type === 'BUY' && o.status === 'pending').length === 0 ? (
-                  <div style={{ fontSize: 10, color: COLORS.textMuted, fontStyle: 'italic', padding: '8px 0' }}>No buy orders</div>
-                ) : (
-                  currentOrders.filter(o => o.type === 'BUY' && o.status === 'pending').map(order => (
-                    <OrderCard key={order.id} order={order} />
-                  ))
-                )}
-              </div>
-            </div>
-
-            {/* Sell Orders */}
-            <div>
-              <h3 style={{
-                margin: '0 0 8px',
-                fontSize: 10,
-                color: COLORS.sell,
-                display: 'flex',
-                alignItems: 'center',
-                gap: 6,
-                textTransform: 'uppercase',
-                letterSpacing: '0.5px',
-                fontWeight: 600,
-              }}>
-                <span style={{ width: 8, height: 8, background: COLORS.sell, borderRadius: 2 }} />
-                SELL ({currentOrders.filter(o => o.type === 'SELL' && o.status === 'pending').length})
-              </h3>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                {currentOrders.filter(o => o.type === 'SELL' && o.status === 'pending').length === 0 ? (
-                  <div style={{ fontSize: 10, color: COLORS.textMuted, fontStyle: 'italic', padding: '8px 0' }}>No sell orders</div>
-                ) : (
-                  currentOrders.filter(o => o.type === 'SELL' && o.status === 'pending').map(order => (
-                    <OrderCard key={order.id} order={order} />
-                  ))
-                )}
-              </div>
-            </div>
-
-            {/* Matched Orders */}
-            {currentOrders.filter(o => o.matchedWith || o.status === 'matched').length > 0 && (
-              <div style={{
-                marginTop: 4,
-                paddingTop: 12,
-                borderTop: `1px solid ${COLORS.panelBorder}`,
-              }}>
-                <h3 style={{
-                  margin: '0 0 8px',
-                  fontSize: 10,
-                  color: COLORS.match,
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 6,
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.5px',
-                  fontWeight: 600,
-                }}>
-                  <span style={{
-                    width: 8,
-                    height: 8,
-                    background: COLORS.match,
-                    borderRadius: '50%',
-                    boxShadow: `0 0 6px ${COLORS.match}`,
-                  }} />
-                  PENDING MATCHES
-                </h3>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                  {currentOrders.filter(o => o.matchedWith || o.status === 'matched').map(order => (
-                    <OrderCard key={order.id} order={order} isMatch />
-                  ))}
+              <h3>Payments</h3>
+              {payments.length === 0 && <p className="muted">No payments.</p>}
+              {payments.map(payment => (
+                <div key={payment.id} className={`card status-${payment.status}`}>
+                  <div className="card-row">
+                    <span>{payment.sender} -> {payment.recipient}</span>
+                    <span>{payment.amount} {payment.token}</span>
+                  </div>
+                  <div className="card-row">
+                    <span>Status: {payment.status}</span>
+                    {payment.status === 'requested' && (
+                      <button onClick={() => acceptPayment(payment.id)}>Accept</button>
+                    )}
+                  </div>
                 </div>
-              </div>
-            )}
-          </>
-        )}
-
-        {/* Payments Tab */}
-        {activeTab === 'payments' && (
-          <>
-            {/* Pending Payment Requests */}
+              ))}
+            </div>
             <div>
-              <h3 style={{
-                margin: '0 0 8px',
-                fontSize: 10,
-                color: '#00ff88',
-                display: 'flex',
-                alignItems: 'center',
-                gap: 6,
-                textTransform: 'uppercase',
-                letterSpacing: '0.5px',
-                fontWeight: 600,
-              }}>
-                <span style={{ width: 8, height: 8, background: '#00ff88', borderRadius: 2 }} />
-                PENDING ({currentPayments.filter(p => p.status === 'pending').length})
-              </h3>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                {currentPayments.filter(p => p.status === 'pending').length === 0 ? (
-                  <div style={{ fontSize: 10, color: COLORS.textMuted, fontStyle: 'italic', padding: '8px 0' }}>No pending payments</div>
-                ) : (
-                  currentPayments.filter(p => p.status === 'pending').map(payment => (
-                    <PaymentCard key={payment.id} payment={payment} />
-                  ))
-                )}
-              </div>
-            </div>
-
-            {/* Fulfilled Payments */}
-            <div>
-              <h3 style={{
-                margin: '0 0 8px',
-                fontSize: 10,
-                color: '#0088ff',
-                display: 'flex',
-                alignItems: 'center',
-                gap: 6,
-                textTransform: 'uppercase',
-                letterSpacing: '0.5px',
-                fontWeight: 600,
-              }}>
-                <span style={{ width: 8, height: 8, background: '#0088ff', borderRadius: 2 }} />
-                FULFILLED ({currentPayments.filter(p => p.status === 'fulfilled').length})
-              </h3>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                {currentPayments.filter(p => p.status === 'fulfilled').length === 0 ? (
-                  <div style={{ fontSize: 10, color: COLORS.textMuted, fontStyle: 'italic', padding: '8px 0' }}>No fulfilled payments</div>
-                ) : (
-                  currentPayments.filter(p => p.status === 'fulfilled').map(payment => (
-                    <PaymentCard key={payment.id} payment={payment} />
-                  ))
-                )}
-              </div>
-            </div>
-          </>
-        )}
-
-        {/* Swaps Tab */}
-        {activeTab === 'swaps' && (
-          <>
-            {/* Pending Swap Orders */}
-            <div>
-              <h3 style={{
-                margin: '0 0 8px',
-                fontSize: 10,
-                color: '#ff8800',
-                display: 'flex',
-                alignItems: 'center',
-                gap: 6,
-                textTransform: 'uppercase',
-                letterSpacing: '0.5px',
-                fontWeight: 600,
-              }}>
-                <span style={{ width: 8, height: 8, background: '#ff8800', borderRadius: 2 }} />
-                PENDING ({currentSwaps.filter(s => s.status === 'pending').length})
-              </h3>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                {currentSwaps.filter(s => s.status === 'pending').length === 0 ? (
-                  <div style={{ fontSize: 10, color: COLORS.textMuted, fontStyle: 'italic', padding: '8px 0' }}>No pending swaps</div>
-                ) : (
-                  currentSwaps.filter(s => s.status === 'pending').map(swap => (
-                    <SwapCard key={swap.id} swap={swap} />
-                  ))
-                )}
-              </div>
-            </div>
-
-            {/* Matched Swaps */}
-            {currentSwaps.filter(s => s.matchedOrderId || s.status === 'matched').length > 0 && (
-              <div style={{
-                marginTop: 4,
-                paddingTop: 12,
-                borderTop: `1px solid ${COLORS.panelBorder}`,
-              }}>
-                <h3 style={{
-                  margin: '0 0 8px',
-                  fontSize: 10,
-                  color: COLORS.match,
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 6,
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.5px',
-                  fontWeight: 600,
-                }}>
-                  <span style={{
-                    width: 8,
-                    height: 8,
-                    background: COLORS.match,
-                    borderRadius: '50%',
-                    boxShadow: `0 0 6px ${COLORS.match}`,
-                  }} />
-                  MATCHED ({currentSwaps.filter(s => s.matchedOrderId && s.status === 'pending').length})
-                </h3>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                  {currentSwaps.filter(s => s.matchedOrderId && s.status === 'pending').map(swap => (
-                    <SwapCard key={swap.id} swap={swap} />
-                  ))}
-                </div>
-              </div>
-            )}
-          </>
-        )}
-      </div>
-
-      {/* Settlement Balances Panel - Bottom Center (Compact) */}
-      {(() => {
-        // Include all transaction types that will be settled
-        const matchedOrders = currentOrders.filter(o => o.matchedWith && o.status === 'pending');
-        const fulfilledPayments = currentPayments.filter(p => p.status === 'fulfilled');
-        const matchedSwaps = currentSwaps.filter(s => s.matchedOrderId && s.status === 'pending');
-
-        const totalTransactions = matchedOrders.length + fulfilledPayments.length + matchedSwaps.length;
-        if (totalTransactions === 0) return null;
-
-        // Calculate gross and net balances per user
-        const userBalances: Record<string, { gross: number; pays: number; receives: number; userName: string }> = {};
-        const processedPairs = new Set<string>();
-
-        const userIndex = (userId: string) => {
-          const idx = config.users.findIndex(u => u.toLowerCase() === userId);
-          return idx >= 0 ? `U${idx + 1}` : userId.slice(0, 4);
-        };
-
-        // Add DvP order balances
-        for (const order of matchedOrders) {
-          if (!order.matchedWith) continue;
-          const pairKey = [order.id, order.matchedWith].sort().join('-');
-          if (processedPairs.has(pairKey)) continue;
-          processedPairs.add(pairKey);
-
-          const matchedOrder = matchedOrders.find(o => o.id === order.matchedWith);
-          if (!matchedOrder) continue;
-
-          const buyOrder = order.type === 'BUY' ? order : matchedOrder;
-          const sellOrder = order.type === 'SELL' ? order : matchedOrder;
-          const price = parseFloat(buyOrder.price);
-
-          if (!userBalances[buyOrder.userId]) {
-            userBalances[buyOrder.userId] = { gross: 0, pays: 0, receives: 0, userName: userIndex(buyOrder.userId) };
-          }
-          if (!userBalances[sellOrder.userId]) {
-            userBalances[sellOrder.userId] = { gross: 0, pays: 0, receives: 0, userName: userIndex(sellOrder.userId) };
-          }
-
-          userBalances[buyOrder.userId].pays += price;
-          userBalances[buyOrder.userId].gross += price;
-          userBalances[sellOrder.userId].receives += price;
-          userBalances[sellOrder.userId].gross += price;
-        }
-
-        // Add payment balances
-        for (const payment of fulfilledPayments) {
-          if (payment.sender === ethers.ZeroAddress) continue; // Skip open requests for now
-          const amount = parseFloat(payment.amount);
-
-          if (!userBalances[payment.sender]) {
-            userBalances[payment.sender] = { gross: 0, pays: 0, receives: 0, userName: userIndex(payment.sender) };
-          }
-          if (!userBalances[payment.recipient]) {
-            userBalances[payment.recipient] = { gross: 0, pays: 0, receives: 0, userName: userIndex(payment.recipient) };
-          }
-
-          userBalances[payment.sender].pays += amount;
-          userBalances[payment.sender].gross += amount;
-          userBalances[payment.recipient].receives += amount;
-          userBalances[payment.recipient].gross += amount;
-        }
-
-        // Add swap balances
-        for (const swap of matchedSwaps) {
-          if (!swap.matchedOrderId) continue;
-          const pairKey = [swap.id, `swap-${swap.matchedOrderId}`].sort().join('-');
-          if (processedPairs.has(pairKey)) continue;
-          processedPairs.add(pairKey);
-
-          const matchedSwap = matchedSwaps.find(s => s.orderId === swap.matchedOrderId);
-          if (!matchedSwap) continue;
-
-          // For swaps, both parties send and receive
-          const swapA = swap;
-          const swapB = matchedSwap;
-          const amountA = parseFloat(swapA.sendAmount);
-          const amountB = parseFloat(swapB.sendAmount);
-
-          if (!userBalances[swapA.maker]) {
-            userBalances[swapA.maker] = { gross: 0, pays: 0, receives: 0, userName: userIndex(swapA.maker) };
-          }
-          if (!userBalances[swapB.maker]) {
-            userBalances[swapB.maker] = { gross: 0, pays: 0, receives: 0, userName: userIndex(swapB.maker) };
-          }
-
-          // Party A pays sendAmount, receives receiveAmount
-          userBalances[swapA.maker].pays += amountA;
-          userBalances[swapA.maker].receives += parseFloat(swapA.receiveAmount);
-          userBalances[swapA.maker].gross += Math.abs(parseFloat(swapA.receiveAmount) - amountA);
-
-          // Party B pays sendAmount, receives receiveAmount
-          userBalances[swapB.maker].pays += amountB;
-          userBalances[swapB.maker].receives += parseFloat(swapB.receiveAmount);
-          userBalances[swapB.maker].gross += Math.abs(parseFloat(swapB.receiveAmount) - amountB);
-        }
-
-        const entries = Object.entries(userBalances);
-        if (entries.length === 0) return null;
-
-        return (
-          <div style={{
-            position: 'fixed',
-            bottom: 12,
-            left: 275,
-            right: 205,
-            background: 'rgba(22, 27, 34, 0.95)',
-            border: `1px solid ${COLORS.panelBorder}`,
-            borderRadius: 8,
-            padding: '10px 16px',
-            boxShadow: '0 4px 16px rgba(0, 0, 0, 0.5)',
-            zIndex: 999,
-          }}>
-            <div style={{
-              fontSize: 11,
-              color: COLORS.textMuted,
-              textTransform: 'uppercase',
-              letterSpacing: '0.5px',
-              marginBottom: 8,
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-            }}>
-              <span>Settlement Obligations</span>
-              <span style={{ color: COLORS.match, fontWeight: 600 }}>
-                {totalTransactions} transaction{totalTransactions !== 1 ? 's' : ''}
-              </span>
-            </div>
-            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-              {entries.map(([userId, balance]) => {
-                const net = balance.receives - balance.pays;
-                return (
-                  <div key={userId} style={{
-                    background: 'rgba(13, 17, 23, 0.8)',
-                    border: `1px solid ${net > 0 ? COLORS.buy : net < 0 ? COLORS.sell : COLORS.panelBorder}50`,
-                    borderRadius: 4,
-                    padding: '6px 10px',
-                    fontSize: 11,
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 10,
-                  }}>
-                    <span style={{ color: '#58a6ff', fontWeight: 700 }}>{balance.userName}</span>
-                    <span style={{ color: COLORS.textMuted }}>Gross: <span style={{ color: '#c9d1d9' }}>{balance.gross.toFixed(0)}</span></span>
-                    <span style={{ 
-                      color: net > 0 ? COLORS.buy : net < 0 ? COLORS.sell : '#c9d1d9',
-                      fontWeight: 700,
-                    }}>
-                      Net: {net > 0 ? '+' : ''}{net.toFixed(0)}
+              <h3>Swaps</h3>
+              {swaps.length === 0 && <p className="muted">No swaps.</p>}
+              {swaps.map(swap => (
+                <div key={swap.id} className={`card status-${swap.status}`}>
+                  <div className="card-row">
+                    <span>{swap.maker}</span>
+                    <span>
+                      {swap.sendAmount} {swap.sendToken} -> {swap.receiveAmount} {swap.receiveToken}
                     </span>
                   </div>
-                );
-              })}
+                  <div className="card-row">
+                    <span>Status: {swap.status}</span>
+                    {swap.matchedId && <span>Match: {swap.matchedId.slice(-4)}</span>}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div>
+              <h3>DvP Orders</h3>
+              {dvps.length === 0 && <p className="muted">No DvP orders.</p>}
+              {dvps.map(order => (
+                <div key={order.id} className={`card status-${order.status}`}>
+                  <div className="card-row">
+                    <span>{order.maker}</span>
+                    <span>{order.side.toUpperCase()} Asset {order.assetId}</span>
+                  </div>
+                  <div className="card-row">
+                    <span>{order.price} {order.paymentToken}</span>
+                    <span>Status: {order.status}</span>
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
-        );
-      })()}
+        </section>
+      </main>
 
+      <aside className="panel details">
+        <h2>Settlement Cycle</h2>
+        {!latestReport && <p className="muted">Run a settlement to see details.</p>}
+        {latestReport && (
+          <>
+            <div className="summary">
+              <div><strong>Started</strong>: {latestReport.startedAt}</div>
+              <div><strong>Rounds</strong>: {latestReport.rounds}</div>
+              <div><strong>Settled</strong>: {latestReport.transactionsSettled.payments} payments, {latestReport.transactionsSettled.swaps} swaps, {latestReport.transactionsSettled.dvps} DvP</div>
+              {latestReport.excludedUsers.length > 0 && (
+                <div><strong>Excluded</strong>: {latestReport.excludedUsers.join(', ')}</div>
+              )}
+            </div>
 
+            <h3>Cycle Steps</h3>
+            <ul className="steps">
+              {latestReport.steps.map((step, idx) => (
+                <li key={`${latestReport.id}-${idx}`}>{step}</li>
+              ))}
+            </ul>
+
+            <h3>Net Positions (All Tokens)</h3>
+            <div className="table">
+              <div className="table-row header">
+                <span>User</span>
+                <span>Net</span>
+                <span>Gross Outgoing</span>
+              </div>
+              {Object.keys(latestReport.netPositions).map(userId => (
+                <div key={userId} className="table-row">
+                  <span>{userId}</span>
+                  <span>{latestReport.netPositions[userId].toFixed(2)}</span>
+                  <span>{(latestReport.grossOutgoing[userId] || 0).toFixed(2)}</span>
+                </div>
+              ))}
+            </div>
+
+            <h3>Token Pool & Payouts</h3>
+            <div className="table">
+              <div className="table-row header">
+                <span>Token</span>
+                <span>Pool Before</span>
+                <span>Pool After</span>
+              </div>
+              {TOKENS.map(token => (
+                <div key={token.id} className="table-row">
+                  <span>{token.symbol}</span>
+                  <span>{(latestReport.poolBeforePayout[token.id] || 0).toFixed(2)}</span>
+                  <span>{(latestReport.poolAfterPayout[token.id] || 0).toFixed(2)}</span>
+                </div>
+              ))}
+            </div>
+
+            <h3>Payout Routing</h3>
+            {Object.keys(latestReport.payouts).length === 0 && (
+              <p className="muted">No payouts in this cycle.</p>
+            )}
+            {Object.entries(latestReport.payouts).map(([userId, payout]) => (
+              <div key={userId} className="card">
+                <div className="card-row">
+                  <strong>{userId}</strong>
+                  <span>Total {sumTokens(payout).toFixed(2)}</span>
+                </div>
+                <div className="token-grid">
+                  {TOKENS.map(token => (
+                    <div key={`${userId}-${token.id}`} className="token-chip">
+                      <span style={{ color: token.color }}>{token.symbol}</span>
+                      <span>{(payout[token.id] || 0).toFixed(2)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </>
+        )}
+      </aside>
     </div>
   );
 }
 
-// ============================================================================
-// SUB-COMPONENTS
-// ============================================================================
-function Button({ children, onClick, style = {} }: { children: React.ReactNode; onClick: () => void; style?: React.CSSProperties }) {
-  const [isHovered, setIsHovered] = useState(false);
-  
-  return (
-    <button
-      onClick={onClick}
-      onMouseEnter={() => setIsHovered(true)}
-      onMouseLeave={() => setIsHovered(false)}
-      style={{
-        padding: '10px 14px',
-        fontSize: 12,
-        fontWeight: 600,
-        border: 'none',
-        borderRadius: 6,
-        background: '#21262d',
-        color: '#e6edf3',
-        cursor: 'pointer',
-        transition: 'all 0.15s ease',
-        transform: isHovered ? 'translateY(-1px)' : 'none',
-        boxShadow: isHovered ? '0 4px 12px rgba(0, 0, 0, 0.3)' : 'none',
-        opacity: isHovered ? 0.9 : 1,
-        ...style,
-      }}
-    >
-      {children}
-    </button>
-  );
-}
+function FlowGraph({
+  users,
+  payments,
+  swaps,
+  dvps,
+}: {
+  users: User[];
+  payments: Payment[];
+  swaps: Swap[];
+  dvps: DvP[];
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [size, setSize] = useState({ width: 600, height: 380 });
 
-function LegendItem({ color, label, isLine = false }: { color: string; label: string; isLine?: boolean }) {
+  useEffect(() => {
+    const update = () => {
+      if (!containerRef.current) return;
+      const rect = containerRef.current.getBoundingClientRect();
+      setSize({ width: rect.width, height: rect.height });
+    };
+    update();
+    window.addEventListener('resize', update);
+    return () => window.removeEventListener('resize', update);
+  }, []);
+
+  const layout = useMemo(() => {
+    const center = { x: size.width / 2, y: size.height / 2 };
+    const radius = Math.max(120, Math.min(size.width, size.height) / 2 - 60);
+    const nodes = users.map((user, idx) => {
+      const angle = (idx / users.length) * Math.PI * 2 - Math.PI / 2;
+      return {
+        ...user,
+        x: center.x + radius * Math.cos(angle),
+        y: center.y + radius * Math.sin(angle),
+      };
+    });
+    return { center, nodes };
+  }, [size, users]);
+
+  const lookup = new Map(layout.nodes.map(node => [node.id, node]));
+
+  const activePayments = payments.filter(p => p.status !== 'settled');
+  const activeSwaps = swaps.filter(s => s.status !== 'settled');
+  const activeDvps = dvps.filter(d => d.status !== 'settled');
+
   return (
-    <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6, fontSize: 11 }}>
-      <span
-        style={{
-          width: isLine ? 16 : 8,
-          height: isLine ? 3 : 8,
-          background: color,
-          borderRadius: isLine ? 2 : 4,
-          marginRight: 8,
-          boxShadow: `0 0 4px ${color}40`,
-        }}
-      />
-      <span style={{ color: COLORS.textMuted }}>{label}</span>
+    <div ref={containerRef} className="graph-container">
+      <svg width={size.width} height={size.height}>
+        <circle
+          cx={layout.center.x}
+          cy={layout.center.y}
+          r={30}
+          fill="#e63946"
+          stroke="#ffffff"
+          strokeWidth={2}
+        />
+        <text x={layout.center.x} y={layout.center.y} textAnchor="middle" dy="4" fill="#fff" fontSize="10">
+          CLEARING
+        </text>
+
+        {activePayments.map(payment => {
+          const sender = lookup.get(payment.sender);
+          const recipient = lookup.get(payment.recipient);
+          if (!sender || !recipient) return null;
+          const token = TOKENS.find(t => t.id === payment.token);
+          const color = token?.color || '#8b949e';
+          return (
+            <g key={payment.id}>
+              <line x1={sender.x} y1={sender.y} x2={layout.center.x} y2={layout.center.y} stroke={color} strokeWidth={2} />
+              <line x1={recipient.x} y1={recipient.y} x2={layout.center.x} y2={layout.center.y} stroke={color} strokeWidth={2} strokeDasharray="4 4" />
+            </g>
+          );
+        })}
+
+        {activeSwaps.map(swap => {
+          const maker = lookup.get(swap.maker);
+          if (!maker) return null;
+          const token = TOKENS.find(t => t.id === swap.sendToken);
+          const color = token?.color || '#8b949e';
+          return (
+            <g key={swap.id}>
+              <line x1={maker.x} y1={maker.y} x2={layout.center.x} y2={layout.center.y} stroke={color} strokeWidth={2} />
+            </g>
+          );
+        })}
+
+        {activeDvps.map(order => {
+          const maker = lookup.get(order.maker);
+          if (!maker) return null;
+          const token = TOKENS.find(t => t.id === order.paymentToken);
+          const color = token?.color || '#8b949e';
+          return (
+            <g key={order.id}>
+              <line x1={maker.x} y1={maker.y} x2={layout.center.x} y2={layout.center.y} stroke={color} strokeWidth={2} />
+            </g>
+          );
+        })}
+
+        {layout.nodes.map(node => (
+          <g key={node.id}>
+            <circle cx={node.x} cy={node.y} r={14} fill="#4cc9f0" stroke="#fff" strokeWidth={2} />
+            <text x={node.x} y={node.y + 26} textAnchor="middle" fontSize="10" fill="#c9d1d9">
+              {node.name}
+            </text>
+          </g>
+        ))}
+      </svg>
     </div>
   );
 }
 
-function TabButton({ children, active, onClick }: { children: React.ReactNode; active: boolean; onClick: () => void }) {
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        flex: 1,
-        padding: '6px 8px',
-        fontSize: 10,
-        fontWeight: active ? 700 : 500,
-        border: 'none',
-        borderRadius: 4,
-        background: active ? COLORS.panelBg : 'rgba(13, 17, 23, 0.4)',
-        color: active ? COLORS.text : COLORS.textMuted,
-        cursor: 'pointer',
-        transition: 'all 0.15s ease',
-        borderBottom: active ? `2px solid ${COLORS.user}` : 'none',
-      }}
-    >
-      {children}
-    </button>
-  );
-}
-
-function OrderCard({ order, isMatch = false }: { order: Order; isMatch?: boolean }) {
-  const borderColor = isMatch ? COLORS.match : (order.type === 'BUY' ? COLORS.buy : COLORS.sell);
-  const age = Math.floor((Date.now() - order.createdAt) / 1000);
-  const formatAge = (s: number) => s < 60 ? `${s}s` : `${Math.floor(s / 60)}m`;
-
-  return (
-    <div style={{
-      background: 'rgba(13, 17, 23, 0.8)',
-      border: `1px solid ${borderColor}40`,
-      borderLeft: `3px solid ${borderColor}`,
-      borderRadius: 4,
-      padding: '6px 10px',
-      fontSize: 11,
-    }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
-        <span style={{ fontWeight: 700, color: borderColor }}>#{order.orderId}</span>
-        <span style={{ color: COLORS.textMuted, flex: 1 }}>{order.asset}</span>
-        <span style={{ color: '#c9d1d9', fontWeight: 600 }}>{order.price}</span>
-        <span style={{ color: COLORS.textMuted }}>{formatAge(age)}</span>
-      </div>
-      {order.matchedWith && (
-        <div style={{
-          marginTop: 4,
-          paddingTop: 4,
-          borderTop: `1px dashed ${COLORS.panelBorder}`,
-          color: COLORS.match,
-          fontSize: 10,
-        }}>
-          ↔ Match #{order.matchedWith.replace('order-', '')}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function PaymentCard({ payment }: { payment: PaymentRequest }) {
-  const borderColor = payment.status === 'fulfilled' ? '#0088ff' : '#00ff88';
-  const age = Math.floor((Date.now() - payment.createdAt) / 1000);
-  const formatAge = (s: number) => s < 60 ? `${s}s` : `${Math.floor(s / 60)}m`;
-
-  return (
-    <div style={{
-      background: 'rgba(13, 17, 23, 0.8)',
-      border: `1px solid ${borderColor}40`,
-      borderLeft: `3px solid ${borderColor}`,
-      borderRadius: 4,
-      padding: '6px 10px',
-      fontSize: 11,
-    }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2 }}>
-        <span style={{ fontWeight: 700, color: borderColor }}>#{payment.paymentId}</span>
-        <span style={{ color: COLORS.textMuted }}>{formatAge(age)}</span>
-      </div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <span style={{ color: COLORS.textMuted, fontSize: 10 }}>
-          {payment.sender === ethers.ZeroAddress ? 'anyone' : payment.sender.slice(0, 4) + '...'} → {payment.recipient.slice(0, 4) + '...'}
-        </span>
-        <span style={{ color: '#c9d1d9', fontWeight: 600, fontSize: 10 }}>{payment.amount}</span>
-      </div>
-      {payment.status === 'fulfilled' && payment.fulfilledToken && (
-        <div style={{
-          marginTop: 4,
-          paddingTop: 4,
-          borderTop: `1px dashed ${COLORS.panelBorder}`,
-          color: '#0088ff',
-          fontSize: 10,
-        }}>
-          ✓ Fulfilled with {payment.fulfilledToken.slice(0, 6)}...
-        </div>
-      )}
-    </div>
-  );
-}
-
-function SwapCard({ swap }: { swap: SwapOrder }) {
-  const borderColor = swap.matchedOrderId ? COLORS.match : '#ff8800';
-  const age = Math.floor((Date.now() - swap.createdAt) / 1000);
-  const formatAge = (s: number) => s < 60 ? `${s}s` : `${Math.floor(s / 60)}m`;
-
-  return (
-    <div style={{
-      background: 'rgba(13, 17, 23, 0.8)',
-      border: `1px solid ${borderColor}40`,
-      borderLeft: `3px solid ${borderColor}`,
-      borderRadius: 4,
-      padding: '6px 10px',
-      fontSize: 11,
-    }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
-        <span style={{ fontWeight: 700, color: borderColor }}>#{swap.orderId}</span>
-        <span style={{ color: COLORS.textMuted, flex: 1 }}>
-          {swap.sendAmount} {swap.sendToken.slice(0, 4)} →
-        </span>
-        <span style={{ color: '#c9d1d9', fontWeight: 600 }}>{swap.receiveAmount}</span>
-        <span style={{ color: COLORS.textMuted }}>{formatAge(age)}</span>
-      </div>
-      {swap.matchedOrderId && (
-        <div style={{
-          marginTop: 4,
-          paddingTop: 4,
-          borderTop: `1px dashed ${COLORS.panelBorder}`,
-          color: COLORS.match,
-          fontSize: 10,
-        }}>
-          ↔ Match #{swap.matchedOrderId}
-        </div>
-      )}
-    </div>
-  );
-}
